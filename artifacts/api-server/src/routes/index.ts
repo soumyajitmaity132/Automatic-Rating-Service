@@ -9,6 +9,7 @@ import approvalsRouter from "./approvals.js";
 import disputesRouter from "./disputes.js";
 import reminderRouter from "./reminder.js";
 import tlDraftsRouter from "./tl-drafts.js";
+import ratingCyclesRouter from "./rating-cycles.js";
 
 const router = Router();
 
@@ -20,6 +21,7 @@ router.use("/items", itemsRouter);
 router.use("/ratings", ratingsRouter);
 router.use("/approvals", approvalsRouter);
 router.use("/tl-drafts", tlDraftsRouter);
+router.use("/rating-cycles", ratingCyclesRouter);
 router.use("/disputes", disputesRouter);
 router.use("/send-reminder", reminderRouter);
 

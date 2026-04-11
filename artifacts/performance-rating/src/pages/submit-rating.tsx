@@ -19,6 +19,15 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -109,10 +118,62 @@ export default function SubmitRating() {
   const [deletedRatingIds, setDeletedRatingIds] = useState<Record<number, number[]>>({});
   const [savingItemId, setSavingItemId] = useState<number | null>(null);
   const [isSubmittingAll, setIsSubmittingAll] = useState(false);
+  const [isCycleOpen, setIsCycleOpen] = useState<boolean>(false);
+  const [isCycleLoading, setIsCycleLoading] = useState(false);
+  const [cycleWarningOpen, setCycleWarningOpen] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
   }, [isLoading, token, setLocation]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.teamId) {
+      setIsCycleOpen(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadCycle = async () => {
+      try {
+        setIsCycleLoading(true);
+        const params = new URLSearchParams({
+          teamId: String(user.teamId),
+          quarter,
+          year: String(year),
+        });
+        const response = await fetch(`/api/rating-cycles?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error("Failed to load cycle status");
+        }
+        const data = await response.json();
+        if (!cancelled) {
+          const open = !!data.isOpen;
+          setIsCycleOpen(open);
+          if (!open) {
+            setCycleWarningOpen(true);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setIsCycleOpen(false);
+          setCycleWarningOpen(true);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsCycleLoading(false);
+        }
+      }
+    };
+
+    loadCycle();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.teamId, quarter, year]);
 
   const itemTargetRole = user?.role === "Team Lead" || user?.role === "Manager" ? "Team Lead" : "User";
   const itemParams = user?.teamId
@@ -157,6 +218,7 @@ export default function SubmitRating() {
   );
   const editableItems = (items ?? []).filter((item) => !submittedItemIds.has(Number(item.itemId)));
   const hasSubmittedForSelectedPeriod = !!items?.length && editableItems.length === 0 && submittedPeriodRatings.length > 0;
+  const isPeriodClosed = !isCycleOpen;
 
   useEffect(() => {
     if (!items) {
@@ -481,6 +543,16 @@ export default function SubmitRating() {
   };
 
   const handleSaveDraft = async (itemId: number, itemName: string) => {
+    if (isPeriodClosed) {
+      toast({
+        title: "Ratings not opened",
+        description: `Ratings for ${quarter} ${year} have not opened for your team.`,
+        variant: "destructive",
+      });
+      setCycleWarningOpen(true);
+      return;
+    }
+
     try {
       setSavingItemId(itemId);
       const success = await persistItem(itemId, "saved");
@@ -502,6 +574,16 @@ export default function SubmitRating() {
   };
 
   const handleSubmit = async () => {
+    if (isPeriodClosed) {
+      toast({
+        title: "Ratings not opened",
+        description: `Ratings for ${quarter} ${year} have not opened for your team.`,
+        variant: "destructive",
+      });
+      setCycleWarningOpen(true);
+      return;
+    }
+
     if (hasSubmittedForSelectedPeriod) {
       toast({
         title: "Ratings already submitted",
@@ -621,6 +703,16 @@ export default function SubmitRating() {
 
         {ratingsLoading ? (
           <div className="text-center py-12 text-muted-foreground">Loading items...</div>
+        ) : isCycleLoading ? (
+          <div className="text-center py-12 text-muted-foreground">Loading cycle status...</div>
+        ) : isPeriodClosed ? (
+          <Card className="p-12 text-center border-dashed">
+            <ClipboardList className="w-12 h-12 mx-auto text-amber-500 mb-3" />
+            <h3 className="font-semibold text-lg mb-1">Ratings Not Opened</h3>
+            <p className="text-muted-foreground">
+              Ratings for Quarter {quarter} and Year {year} have not opened. You cannot fill this form now.
+            </p>
+          </Card>
         ) : !items || items.length === 0 ? (
           <Card className="p-12 text-center border-dashed">
             <ClipboardList className="w-12 h-12 mx-auto text-muted-foreground/50 mb-3" />
@@ -794,6 +886,20 @@ export default function SubmitRating() {
           </>
         )}
       </div>
+
+      <AlertDialog open={cycleWarningOpen} onOpenChange={setCycleWarningOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Ratings Not Opened</AlertDialogTitle>
+            <AlertDialogDescription>
+              Ratings for Quarter {quarter} and Year {year} have not opened, and you will not be able to fill this form.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction>OK</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Layout>
   );
 }

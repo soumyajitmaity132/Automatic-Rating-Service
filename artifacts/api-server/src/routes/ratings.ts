@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { ratingsTable, itemsToRateTable, usersTable, teamsTable } from "@workspace/db/schema";
 import { eq, and, or, isNull } from "drizzle-orm";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
+import { getRatingCycleStatus } from "../lib/rating-cycle.js";
 
 const router = Router();
 
@@ -285,6 +286,14 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
+    if (currentUser.teamId) {
+      const cycleOpen = await getRatingCycleStatus(currentUser.teamId, quarter, Number(year));
+      if (!cycleOpen) {
+        res.status(403).json({ error: `Ratings for ${quarter} ${year} have not opened yet for your team` });
+        return;
+      }
+    }
+
     const numVal = parseFloat(ratingValue);
     if (isNaN(numVal) || numVal < 0.1 || numVal > 5.0) {
       res.status(400).json({ error: "ratingValue must be between 0.1 and 5.0" });
@@ -450,6 +459,24 @@ router.put("/:ratingId", authenticate, async (req: AuthRequest, res) => {
     if (projectName !== undefined) updates.projectName = projectName;
     if (status !== undefined) updates.status = normalizeRatingStatus(status);
 
+    const [existingRating] = await db
+      .select()
+      .from(ratingsTable)
+      .where(and(eq(ratingsTable.ratingId, ratingId), eq(ratingsTable.userId, currentUser.userId)));
+
+    if (!existingRating) {
+      res.status(404).json({ error: "Rating not found" });
+      return;
+    }
+
+    if (currentUser.teamId) {
+      const cycleOpen = await getRatingCycleStatus(currentUser.teamId, existingRating.quarter, Number(existingRating.year));
+      if (!cycleOpen) {
+        res.status(403).json({ error: `Ratings for ${existingRating.quarter} ${existingRating.year} are closed for your team` });
+        return;
+      }
+    }
+
     const [rating] = await db
       .update(ratingsTable)
       .set(updates)
@@ -473,15 +500,29 @@ router.delete("/:ratingId", authenticate, async (req: AuthRequest, res) => {
     const currentUser = req.user!;
     const ratingId = Number(req.params.ratingId);
 
+    const [existingRating] = await db
+      .select()
+      .from(ratingsTable)
+      .where(and(eq(ratingsTable.ratingId, ratingId), eq(ratingsTable.userId, currentUser.userId)));
+
+    if (!existingRating) {
+      res.status(404).json({ error: "Rating not found" });
+      return;
+    }
+
+    if (currentUser.teamId) {
+      const cycleOpen = await getRatingCycleStatus(currentUser.teamId, existingRating.quarter, Number(existingRating.year));
+      if (!cycleOpen) {
+        res.status(403).json({ error: `Ratings for ${existingRating.quarter} ${existingRating.year} are closed for your team` });
+        return;
+      }
+    }
+
     const [deleted] = await db
       .delete(ratingsTable)
       .where(and(eq(ratingsTable.ratingId, ratingId), eq(ratingsTable.userId, currentUser.userId)))
       .returning({ ratingId: ratingsTable.ratingId });
 
-    if (!deleted) {
-      res.status(404).json({ error: "Rating not found" });
-      return;
-    }
 
     res.json({ message: "Rating deleted" });
   } catch (err) {

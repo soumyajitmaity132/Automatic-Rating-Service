@@ -83,17 +83,116 @@ export default function ManageTeam() {
   const currentYear = new Date().getFullYear();
   const [cycleQ, setCycleQ] = useState<RatingQuarter>(RatingQuarter.Q1);
   const [cycleY, setCycleY] = useState<number>(currentYear);
+  const [isCycleOpen, setIsCycleOpen] = useState(false);
+  const [isCycleLoading, setIsCycleLoading] = useState(false);
+  const [isCycleUpdating, setIsCycleUpdating] = useState(false);
+  const [cycleConfirmOpen, setCycleConfirmOpen] = useState(false);
+  const [pendingCycleState, setPendingCycleState] = useState<boolean | null>(null);
 
-  const [cycleStatusByQuarterYear, setCycleStatusByQuarterYear] = useState<Record<string, boolean>>({});
-  const cycleKey = `${cycleQ}-${cycleY}`;
-  const isCycleOpen = cycleStatusByQuarterYear[cycleKey] ?? false;
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.teamId) {
+      setIsCycleOpen(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadCycle = async () => {
+      try {
+        setIsCycleLoading(true);
+        const params = new URLSearchParams({
+          teamId: String(user.teamId),
+          quarter: cycleQ,
+          year: String(cycleY),
+        });
+        const response = await fetch(`/api/rating-cycles?${params.toString()}`);
+        if (!response.ok) {
+          throw new Error("Failed to load cycle status");
+        }
+        const data = await response.json();
+        if (!cancelled) {
+          setIsCycleOpen(!!data.isOpen);
+        }
+      } catch {
+        if (!cancelled) {
+          setIsCycleOpen(false);
+          toast({ title: "Unable to load cycle status", variant: "destructive" });
+        }
+      } finally {
+        if (!cancelled) {
+          setIsCycleLoading(false);
+        }
+      }
+    };
+
+    loadCycle();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.teamId, cycleQ, cycleY]);
 
   const handleToggleCycle = (checked: boolean) => {
-    setCycleStatusByQuarterYear((prev) => ({
-      ...prev,
-      [cycleKey]: checked,
-    }));
-    toast({ title: `Quarter submissions ${checked ? "opened" : "closed"}` });
+    setPendingCycleState(checked);
+    setCycleConfirmOpen(true);
+  };
+
+  const confirmCycleToggle = async () => {
+    if (!user?.teamId || pendingCycleState === null) {
+      setCycleConfirmOpen(false);
+      return;
+    }
+
+    try {
+      setIsCycleUpdating(true);
+      const response = await fetch("/api/rating-cycles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          teamId: user.teamId,
+          quarter: cycleQ,
+          year: cycleY,
+          isOpen: pendingCycleState,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.error ?? "Failed to update cycle status");
+      }
+
+      const data = await response.json();
+      setIsCycleOpen(!!data.isOpen);
+      setCycleConfirmOpen(false);
+      setPendingCycleState(null);
+
+      if (data.isOpen) {
+        toast({ title: `Ratings opened for ${cycleQ} ${cycleY}` });
+      } else {
+        const summary = data.autoSubmitSummary;
+        const detail = summary
+          ? `${summary.ratingsProcessed} ratings processed, ${summary.approvalsCreated} approvals created, ${summary.approvalsUpdated} approvals updated.`
+          : "Team ratings were processed.";
+        toast({
+          title: `Ratings closed for ${cycleQ} ${cycleY}`,
+          description: detail,
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Failed to update cycle status",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+      setCycleConfirmOpen(false);
+      setPendingCycleState(null);
+    } finally {
+      setIsCycleUpdating(false);
+    }
   };
 
   const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
@@ -325,6 +424,7 @@ export default function ManageTeam() {
                 id="cycle-toggle"
                 checked={isCycleOpen}
                 onCheckedChange={handleToggleCycle}
+                disabled={isCycleLoading || isCycleUpdating}
               />
             </div>
           </div>
@@ -391,6 +491,37 @@ export default function ManageTeam() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleRemove} disabled={isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
               Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={cycleConfirmOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCycleConfirmOpen(false);
+            setPendingCycleState(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingCycleState
+                ? "Open Ratings"
+                : "Close Ratings"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingCycleState
+                ? `Are you sure you want to open Ratings for Quarter ${cycleQ} and Year ${cycleY}?`
+                : `Are you sure you want to close the Ratings for Quarter ${cycleQ} and Year ${cycleY}? On close, saved/submitted ratings for your team will be auto-submitted into approvals.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>No</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmCycleToggle} disabled={isCycleUpdating}>
+              {isCycleUpdating ? "Updating..." : "Yes"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
