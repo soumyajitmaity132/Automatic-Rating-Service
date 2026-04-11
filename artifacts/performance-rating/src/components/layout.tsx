@@ -3,7 +3,7 @@ import { useAuth } from "@/lib/auth";
 import { Link, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import {
-  LogOut, LayoutDashboard, ClipboardList, Users, CheckSquare,
+  LogOut, LayoutDashboard, ClipboardList, CheckSquare,
   Settings, UserCheck, GitBranch, ShieldCheck, Moon, Sun, Menu, X, Star
 } from "lucide-react";
 import { clsx } from "clsx";
@@ -18,7 +18,6 @@ interface NavItem {
 const navItems: NavItem[] = [
   { href: "/dashboard",      icon: <LayoutDashboard className="w-5 h-5" />, label: "Dashboard",       roles: ["User", "Team Lead", "Manager"] },
   { href: "/submit-rating",  icon: <Star className="w-5 h-5" />,            label: "Submit Rating",   roles: ["User", "Team Lead", "Manager"] },
-  { href: "/my-team",        icon: <Users className="w-5 h-5" />,           label: "My Team",         roles: ["Team Lead", "Manager"] },
   { href: "/approve-ratings",icon: <CheckSquare className="w-5 h-5" />,     label: "Approve Ratings", roles: ["Team Lead", "Manager"] },
   { href: "/manage-kpis",    icon: <ClipboardList className="w-5 h-5" />,    label: "Manage KPIs",     roles: ["Team Lead", "Manager"] },
   { href: "/manage-leads",   icon: <UserCheck className="w-5 h-5" />,       label: "Manage Leads",    roles: ["Manager"] },

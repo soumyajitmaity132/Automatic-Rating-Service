@@ -9,7 +9,6 @@ import NotFound from "@/pages/not-found";
 import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
 import SubmitRating from "@/pages/submit-rating";
-import MyTeam from "@/pages/my-team";
 import ApproveRatings from "@/pages/approve-ratings";
 import ManageTeam from "./pages/manage-team";
 import RateTLs from "@/pages/rate-tls";
@@ -36,7 +35,6 @@ function Router() {
       <Route path="/login" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/submit-rating" component={SubmitRating} />
-      <Route path="/my-team" component={MyTeam} />
       <Route path="/approve-ratings" component={ApproveRatings} />
       <Route path="/manage-team" component={ManageTeam} />
       <Route path="/rate-tls" component={RateTLs} />
