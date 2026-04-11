@@ -16,6 +16,7 @@ import ReassignLeads from "@/pages/reassign-leads";
 import FinalApprovals from "@/pages/final-approvals";
 import ManageKPIs from "@/pages/manage-kpis";
 import ManageLeads from "@/pages/manage-leads";
+import ReferedRatings from "@/pages/refered-ratings";
 
 setupFetchInterceptor();
 
@@ -37,6 +38,7 @@ function Router() {
       <Route path="/submit-rating" component={SubmitRating} />
       <Route path="/approve-ratings" component={ApproveRatings} />
       <Route path="/manage-team" component={ManageTeam} />
+      <Route path="/refered-ratings" component={ReferedRatings} />
       <Route path="/rate-tls" component={RateTLs} />
       <Route path="/reassign-leads" component={ReassignLeads} />
       <Route path="/final-approvals" component={FinalApprovals} />

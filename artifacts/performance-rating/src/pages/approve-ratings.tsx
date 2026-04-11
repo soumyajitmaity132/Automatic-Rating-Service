@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { CheckCircle, XCircle, ChevronDown, ChevronUp, CheckSquare, AlertTriangle, Bell, History } from "lucide-react";
+import { CheckCircle, XCircle, ChevronDown, ChevronUp, CheckSquare, AlertTriangle, Bell, History, UserPlus } from "lucide-react";
 
 function ratingLabel(v: number): string {
   if (v >= 4.5) return "Exceptional";
@@ -45,6 +45,15 @@ interface TlDraft {
   year?: number | null;
   isActive: boolean;
   updatedOn?: string | null;
+}
+
+interface ReferableTeamLead {
+  userId: string;
+  displayName: string;
+  email: string;
+  level: string;
+  teamId: number | null;
+  teamName: string | null;
 }
 
 async function listTlDrafts(params: { ratedUserId: string; quarter: RatingQuarter; year: number }): Promise<TlDraft[]> {
@@ -108,6 +117,29 @@ async function saveTlDraft(payload: {
   return response.json();
 }
 
+async function listReferableTeamLeads(): Promise<ReferableTeamLead[]> {
+  const response = await fetch("/api/ratings/referable-team-leads");
+  if (!response.ok) {
+    throw new Error("Failed to load Team Leads");
+  }
+  return response.json();
+}
+
+async function referRating(payload: { ratingId: number; referencedTlUserId: string | null }): Promise<void> {
+  const response = await fetch(`/api/ratings/${payload.ratingId}/refer`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ referencedTlUserId: payload.referencedTlUserId }),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    throw new Error(errorBody?.error ?? "Failed to refer rating");
+  }
+}
+
 function NotifyDialog({ member, sender, open, onClose }: {
   member: UserProfile;
   sender: UserProfile;
@@ -164,8 +196,12 @@ function NotifyDialog({ member, sender, open, onClose }: {
   );
 }
 
-function MemberPanel({ member, quarter, year, currentUser }: {
-  member: UserProfile; quarter: RatingQuarter; year: number; currentUser: UserProfile;
+function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
+  member: UserProfile;
+  quarter: RatingQuarter;
+  year: number;
+  currentUser: UserProfile;
+  referableLeads: ReferableTeamLead[];
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -181,6 +217,10 @@ function MemberPanel({ member, quarter, year, currentUser }: {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyDrafts, setHistoryDrafts] = useState<TlDraft[]>([]);
   const [historyLabel, setHistoryLabel] = useState<string>("");
+  const [referDialogOpen, setReferDialogOpen] = useState(false);
+  const [referRatingContext, setReferRatingContext] = useState<Rating | null>(null);
+  const [selectedReferLeadId, setSelectedReferLeadId] = useState<string>("");
+  const [isReferring, setIsReferring] = useState(false);
 
   const { data: ratings } = useListRatings(
     { userId: member.userId, quarter, year },
@@ -217,6 +257,10 @@ function MemberPanel({ member, quarter, year, currentUser }: {
     [drafts, currentUser.userId],
   );
   const periodKey = `${member.userId}-${quarter}-${year}`;
+  const leadNameById = useMemo(
+    () => new Map(referableLeads.map((lead) => [lead.userId, lead.displayName])),
+    [referableLeads],
+  );
 
   useEffect(() => {
     setTlVals({});
@@ -552,6 +596,43 @@ function MemberPanel({ member, quarter, year, currentUser }: {
     }
   };
 
+  const openReferDialog = (rating: Rating) => {
+    setReferRatingContext(rating);
+    setSelectedReferLeadId((rating as any).referencedTlUserId ?? "");
+    setReferDialogOpen(true);
+  };
+
+  const handleSaveReferral = async () => {
+    if (!referRatingContext) return;
+
+    try {
+      setIsReferring(true);
+      await referRating({
+        ratingId: referRatingContext.ratingId,
+        referencedTlUserId: selectedReferLeadId || null,
+      });
+
+      toast({
+        title: selectedReferLeadId ? "Rating referred" : "Referral cleared",
+        description: selectedReferLeadId
+          ? "The selected Team Lead can now review this item in Referred Ratings."
+          : "This item is no longer referred.",
+      });
+
+      setReferDialogOpen(false);
+      setReferRatingContext(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/ratings"] });
+    } catch (error) {
+      toast({
+        title: "Unable to save referral",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsReferring(false);
+    }
+  };
+
   return (
     <>
       <Card className="overflow-hidden">
@@ -625,6 +706,7 @@ function MemberPanel({ member, quarter, year, currentUser }: {
                       <TableHead>Artifacts Link</TableHead>
                       <TableHead>Lead Rating</TableHead>
                       <TableHead>Lead Comment</TableHead>
+                      <TableHead>Refer</TableHead>
                       <TableHead>Draft</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -689,6 +771,24 @@ function MemberPanel({ member, quarter, year, currentUser }: {
                                 placeholder={isLeadRatingDifferent ? "Required when rating differs" : "Lead comment"}
                                 className={`min-h-[72px]${isLeadRatingDifferent && !(leadComments[rowKey] ?? "").trim() ? " border-red-500 focus-visible:ring-red-500" : ""}`}
                               />
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="space-y-2 min-w-[170px]">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="gap-1.5"
+                                onClick={() => openReferDialog(rating)}
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                                Refer
+                              </Button>
+                              {(rating as any).referencedTlUserId && (
+                                <p className="text-xs text-muted-foreground whitespace-pre-wrap">
+                                  Referred to: {leadNameById.get((rating as any).referencedTlUserId) ?? (rating as any).referencedTlUserId}
+                                </p>
+                              )}
                             </div>
                           </TableCell>
                           <TableCell>
@@ -818,6 +918,45 @@ function MemberPanel({ member, quarter, year, currentUser }: {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={referDialogOpen} onOpenChange={setReferDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Refer this rating to another Team Lead</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {referRatingContext?.itemName || "Item"} — {referRatingContext?.projectName || "No project name"}
+            </p>
+            <div className="space-y-1">
+              <Label>Select Team Lead</Label>
+              <Select value={selectedReferLeadId} onValueChange={setSelectedReferLeadId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Choose Team Lead" />
+                </SelectTrigger>
+                <SelectContent>
+                  {referableLeads.map((lead) => (
+                    <SelectItem key={lead.userId} value={lead.userId}>
+                      {lead.displayName} · {lead.teamName || "No team"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setReferDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="outline" onClick={() => setSelectedReferLeadId("")} disabled={isReferring}>
+              Clear
+            </Button>
+            <Button onClick={handleSaveReferral} disabled={isReferring}>
+              {isReferring ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -831,11 +970,39 @@ export default function ApproveRatings() {
   const currentYear = new Date().getFullYear();
   const [quarter, setQuarter] = useState<RatingQuarter>(RatingQuarter.Q1);
   const [year, setYear] = useState<number>(currentYear);
+  const [referableLeads, setReferableLeads] = useState<ReferableTeamLead[]>([]);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
     if (!isLoading && user && user.role === "User") setLocation("/dashboard");
   }, [isLoading, token, user, setLocation]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!token || !user || user.role === "User") {
+      setReferableLeads([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    listReferableTeamLeads()
+      .then((data) => {
+        if (!cancelled) {
+          setReferableLeads(data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReferableLeads([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, user]);
 
   const { data: members } = useListUsers(
     user?.teamId ? { teamId: user.teamId } : undefined,
@@ -927,7 +1094,14 @@ export default function ApproveRatings() {
             <Card className="p-10 text-center border-dashed text-muted-foreground">No team members to review.</Card>
           ) : (
             teamMembers.map(m => (
-              <MemberPanel key={m.userId} member={m} quarter={quarter} year={year} currentUser={user} />
+              <MemberPanel
+                key={m.userId}
+                member={m}
+                quarter={quarter}
+                year={year}
+                currentUser={user}
+                referableLeads={referableLeads}
+              />
             ))
           )}
         </div>

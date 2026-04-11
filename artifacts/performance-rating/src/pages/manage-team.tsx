@@ -1,18 +1,19 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { Layout } from "@/components/layout";
-import { useListUsers, useUpdateUser, useRegisterUser, useSendReminder } from "@workspace/api-client-react";
+import { useListUsers, useUpdateUser, useRegisterUser, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Settings, UserMinus, Plus, Pencil, Mail, ShieldCheck, Bell } from "lucide-react";
+import { Settings, UserMinus, Plus, Pencil, Mail, ShieldCheck, Bell, CalendarClock } from "lucide-react";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -78,6 +79,22 @@ export default function ManageTeam() {
   const { mutate: updateUser, isPending } = useUpdateUser();
   const { mutate: registerUser, isPending: isRegistering } = useRegisterUser();
   const { mutateAsync: sendReminderAsync, isPending: isSending } = useSendReminder();
+
+  const currentYear = new Date().getFullYear();
+  const [cycleQ, setCycleQ] = useState<RatingQuarter>(RatingQuarter.Q1);
+  const [cycleY, setCycleY] = useState<number>(currentYear);
+
+  const [cycleStatusByQuarterYear, setCycleStatusByQuarterYear] = useState<Record<string, boolean>>({});
+  const cycleKey = `${cycleQ}-${cycleY}`;
+  const isCycleOpen = cycleStatusByQuarterYear[cycleKey] ?? false;
+
+  const handleToggleCycle = (checked: boolean) => {
+    setCycleStatusByQuarterYear((prev) => ({
+      ...prev,
+      [cycleKey]: checked,
+    }));
+    toast({ title: `Quarter submissions ${checked ? "opened" : "closed"}` });
+  };
 
   const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
 
@@ -270,6 +287,48 @@ export default function ManageTeam() {
             </div>
           </div>
         </div>
+
+        <Card className="p-5 border-border/50 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <CalendarClock className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold">Submission Cycle Management</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Toggle the status to Open or Close the submission window for a specific quarter. When closed, members cannot submit or edit ratings for that quarter.
+          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-secondary/20 rounded-xl border">
+            <div className="flex items-center gap-3">
+              <Select value={cycleQ} onValueChange={(v) => setCycleQ(v as RatingQuarter)}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(["Q1","Q2","Q3","Q4"] as const).map(q => <SelectItem key={q} value={q}>{q}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={cycleY.toString()} onValueChange={(v) => setCycleY(parseInt(v))}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[currentYear - 1, currentYear, currentYear + 1, currentYear + 2].map(y => (
+                    <SelectItem key={y} value={y.toString()}>{y}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="cycle-toggle" className="text-sm font-medium">
+                {isCycleOpen ? (
+                  <span className="text-emerald-600 dark:text-emerald-400">Open</span>
+                ) : (
+                  <span className="text-muted-foreground">Closed</span>
+                )}
+              </Label>
+              <Switch
+                id="cycle-toggle"
+                checked={isCycleOpen}
+                onCheckedChange={handleToggleCycle}
+              />
+            </div>
+          </div>
+        </Card>
 
         {loadingMembers ? (
           <div className="text-center py-12 text-muted-foreground">Loading...</div>

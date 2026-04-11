@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { ratingsTable, itemsToRateTable, usersTable } from "@workspace/db/schema";
+import { ratingsTable, itemsToRateTable, usersTable, teamsTable } from "@workspace/db/schema";
 import { eq, and, or, isNull } from "drizzle-orm";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
 
@@ -35,6 +35,12 @@ function normalizeRatingStatus(value: unknown): "saved" | "pending" | "submitted
   }
 
   return "pending";
+}
+
+function normalizeOptionalText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 router.get("/summary", authenticate, async (req: AuthRequest, res) => {
@@ -149,6 +155,7 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
         quarter: ratingsTable.quarter,
         year: ratingsTable.year,
         artifactLinks: ratingsTable.artifactLinks,
+        referencedTlUserId: ratingsTable.referencedTlUserId,
         status: ratingsTable.status,
         createdOn: ratingsTable.createdOn,
       })
@@ -166,6 +173,102 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
     );
   } catch (err) {
     req.log.error(err, "List ratings error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.get("/referable-team-leads", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role === "User") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const allLeads = await db
+      .select({
+        userId: usersTable.userId,
+        displayName: usersTable.displayName,
+        email: usersTable.email,
+        level: usersTable.level,
+        teamId: usersTable.teamId,
+      })
+      .from(usersTable)
+      .where(eq(usersTable.role, "Team Lead"));
+
+    const teams = await db.select().from(teamsTable);
+    const teamNameById = new Map(teams.map((team) => [team.teamId, team.teamName]));
+
+    const leads = allLeads
+      .filter((lead) => lead.teamId != null)
+      .filter((lead) => {
+        if (currentUser.role === "Team Lead") {
+          return lead.teamId !== currentUser.teamId;
+        }
+        return true;
+      })
+      .map((lead) => ({
+        ...lead,
+        teamName: lead.teamId ? teamNameById.get(lead.teamId) ?? null : null,
+      }));
+
+    res.json(leads);
+  } catch (err) {
+    req.log.error(err, "List referable team leads error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.get("/referred", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role === "User") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const { quarter, year } = req.query as { quarter?: string; year?: string };
+
+    const conditions: any[] = [eq(ratingsTable.referencedTlUserId, currentUser.userId)];
+    if (quarter) conditions.push(eq(ratingsTable.quarter, quarter));
+    if (year) {
+      const parsedYear = Number.parseInt(year, 10);
+      if (!Number.isNaN(parsedYear)) {
+        conditions.push(eq(ratingsTable.year, parsedYear));
+      }
+    }
+
+    const rows = await db
+      .select({
+        ratingId: ratingsTable.ratingId,
+        itemId: ratingsTable.itemId,
+        itemName: itemsToRateTable.itemName,
+        projectName: ratingsTable.projectName,
+        userRating: ratingsTable.ratingValue,
+        kpiAchieved: ratingsTable.kpiAchieved,
+        artifactLinks: ratingsTable.artifactLinks,
+        quarter: ratingsTable.quarter,
+        year: ratingsTable.year,
+        ratedUserId: usersTable.userId,
+        ratedUserName: usersTable.displayName,
+        ratedUserLevel: usersTable.level,
+        ratedUserTeamId: usersTable.teamId,
+      })
+      .from(ratingsTable)
+      .leftJoin(itemsToRateTable, eq(ratingsTable.itemId, itemsToRateTable.itemId))
+      .leftJoin(usersTable, eq(ratingsTable.userId, usersTable.userId))
+      .where(and(...conditions));
+
+    const teams = await db.select().from(teamsTable);
+    const teamNameById = new Map(teams.map((team) => [team.teamId, team.teamName]));
+
+    res.json(rows.map((row) => ({
+      ...row,
+      ratedUserTeamName: row.ratedUserTeamId ? teamNameById.get(row.ratedUserTeamId) ?? null : null,
+      referredByLead: "Team Lead",
+    })));
+  } catch (err) {
+    req.log.error(err, "List referred ratings error");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
@@ -237,6 +340,98 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
     res.status(201).json({ ...rating, comment: rating.kpiAchieved, status: rating.status ?? "submitted", itemName: item?.itemName ?? null, category: item?.category ?? null, createdOn: toIsoDateString(rating.createdOn) });
   } catch (err) {
     req.log.error(err, "Submit rating error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.post("/:ratingId/refer", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role === "User") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const ratingId = Number(req.params.ratingId);
+    if (Number.isNaN(ratingId)) {
+      res.status(400).json({ error: "Invalid ratingId" });
+      return;
+    }
+
+    const referencedTlUserId = normalizeOptionalText(req.body?.referencedTlUserId);
+
+    const [targetRating] = await db
+      .select()
+      .from(ratingsTable)
+      .where(eq(ratingsTable.ratingId, ratingId));
+
+    if (!targetRating) {
+      res.status(404).json({ error: "Rating not found" });
+      return;
+    }
+
+    const [ratedUser] = await db
+      .select({ userId: usersTable.userId, teamId: usersTable.teamId })
+      .from(usersTable)
+      .where(eq(usersTable.userId, targetRating.userId));
+
+    if (!ratedUser) {
+      res.status(404).json({ error: "Rated user not found" });
+      return;
+    }
+
+    const isOriginalTeamLead = currentUser.role === "Team Lead" && currentUser.teamId === ratedUser.teamId;
+    const isReferredTeamLead = currentUser.role === "Team Lead" && targetRating.referencedTlUserId === currentUser.userId;
+
+    if (currentUser.role === "Team Lead" && !isOriginalTeamLead && !isReferredTeamLead) {
+      res.status(403).json({ error: "You are not allowed to update referral for this rating" });
+      return;
+    }
+
+    if (isReferredTeamLead && referencedTlUserId) {
+      res.status(403).json({ error: "Referred Team Lead can only send back to original Team Lead" });
+      return;
+    }
+
+    if (referencedTlUserId) {
+      const [targetLead] = await db
+        .select({ userId: usersTable.userId, role: usersTable.role, teamId: usersTable.teamId })
+        .from(usersTable)
+        .where(eq(usersTable.userId, referencedTlUserId));
+
+      if (!targetLead || targetLead.role !== "Team Lead") {
+        res.status(400).json({ error: "Referenced user must be a Team Lead" });
+        return;
+      }
+
+      if (targetLead.teamId == null) {
+        res.status(400).json({ error: "Referenced Team Lead must belong to a team" });
+        return;
+      }
+
+      if (isOriginalTeamLead && targetLead.teamId === currentUser.teamId) {
+        res.status(400).json({ error: "Please refer to a Team Lead from a different team" });
+        return;
+      }
+
+      if (currentUser.role === "Manager" && ratedUser.teamId != null && targetLead.teamId === ratedUser.teamId) {
+        res.status(400).json({ error: "Please refer to a Team Lead from a different team" });
+        return;
+      }
+    }
+
+    const [updated] = await db
+      .update(ratingsTable)
+      .set({ referencedTlUserId: referencedTlUserId ?? null })
+      .where(eq(ratingsTable.ratingId, ratingId))
+      .returning({ ratingId: ratingsTable.ratingId, referencedTlUserId: ratingsTable.referencedTlUserId });
+
+    res.json({
+      message: referencedTlUserId ? "Rating referred successfully" : "Rating referral cleared",
+      ...updated,
+    });
+  } catch (err) {
+    req.log.error(err, "Refer rating error");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
