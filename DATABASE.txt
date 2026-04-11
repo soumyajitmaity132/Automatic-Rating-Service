@@ -1,0 +1,4426 @@
+﻿File path: /home/chaudharyharshit/Employee-Performance-Hub/lib/db/src/schema/users.ts
+
+import { pgTable, text, integer, timestamp, date } from "drizzle-orm/pg-core";
+import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod/v4";
+import { teamsTable } from "./teams";
+
+
+export const usersTable = pgTable("users", {
+  userId: text("user_id").primaryKey(),
+  displayName: text("display_name").notNull(),
+  securityKey: text("security_key"),
+  password: text("password").notNull(),
+  username: text("username").notNull().unique(),
+  email: text("email").notNull().unique(),
+  teamId: integer("team_id").references(() => teamsTable.teamId),
+  role: text("role").notNull().default("User"),
+  level: text("level").notNull().default("L1"),
+  createdAt: timestamp("created_at").defaultNow(),
+  // New profile fields
+  ldap: text("ldap").unique(),
+  process: text("process"),
+  vacoEmployeeCode: text("vaco_employee_code"),
+  joiningDate: date("joining_date"),
+});
+
+
+export const insertUserSchema = createInsertSchema(usersTable).omit({
+  createdAt: true,
+});
+export type InsertUser = z.infer<typeof insertUserSchema>;
+export type User = typeof usersTable.$inferSelect;
+
+
+File path: /home/chaudharyharshit/Employee-Performance-Hub/artifacts/api-server/src/routes/users.ts
+import { Router } from "express";
+import { db } from "@workspace/db";
+import { usersTable, teamsTable } from "@workspace/db/schema";
+import { eq } from "drizzle-orm";
+import { authenticate, AuthRequest, requireRole } from "../middlewares/authenticate.js";
+import { hashPassword } from "../lib/auth.js";
+import { randomUUID } from "crypto";
+
+
+const router = Router();
+
+
+// Helper to shape a user response with new fields
+function toUserResponse(u: typeof usersTable.$inferSelect, teamName: string | null = null) {
+  return {
+    userId: u.userId,
+    displayName: u.displayName,
+    username: u.username,
+    email: u.email,
+    role: u.role,
+    level: u.level,
+    teamId: u.teamId,
+    teamName,
+    ldap: u.ldap ?? null,
+    process: u.process ?? null,
+    vacoEmployeeCode: u.vacoEmployeeCode ?? null,
+    joiningDate: u.joiningDate ?? null,
+  };
+}
+
+
+router.get("/", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const teamId = req.query.teamId ? Number(req.query.teamId) : undefined;
+    const currentUser = req.user!;
+
+
+    let users;
+    if (currentUser.role === "Manager") {
+      users = teamId
+        ? await db.select().from(usersTable).where(eq(usersTable.teamId, teamId))
+        : await db.select().from(usersTable);
+    } else if (currentUser.role === "Team Lead") {
+      users = currentUser.teamId
+        ? await db.select().from(usersTable).where(eq(usersTable.teamId, currentUser.teamId))
+        : [];
+    } else {
+      users = await db.select().from(usersTable).where(eq(usersTable.userId, currentUser.userId));
+    }
+
+
+    const teams = await db.select().from(teamsTable);
+    const teamMap = new Map(teams.map((t) => [t.teamId, t.teamName]));
+
+
+    res.json(
+      users.map((u) => toUserResponse(u, u.teamId ? teamMap.get(u.teamId) ?? null : null))
+    );
+  } catch (err) {
+    req.log.error(err, "List users error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+router.post("/register", authenticate, requireRole("Team Lead", "Manager"), async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    const { displayName, username, email, password, role, level, teamId, ldap, process, vacoEmployeeCode, joiningDate } = req.body;
+
+
+    if (!displayName || !username || !email || !password) {
+      res.status(400).json({ error: "displayName, username, email, and password are required" });
+      return;
+    }
+
+
+    const allowedRole = currentUser.role === "Manager" ? "Team Lead" : "User";
+    const resolvedRole = role ?? allowedRole;
+
+
+    if (currentUser.role === "Team Lead" && resolvedRole !== "User") {
+      res.status(403).json({ error: "Team Leads can only create Users" });
+      return;
+    }
+
+
+    const resolvedTeamId =
+      currentUser.role === "Team Lead" ? currentUser.teamId : (teamId ?? null);
+
+
+    // Check username uniqueness
+    const existing = await db
+      .select({ userId: usersTable.userId })
+      .from(usersTable)
+      .where(eq(usersTable.username, username));
+
+
+    if (existing.length > 0) {
+      res.status(400).json({ error: "Username already exists" });
+      return;
+    }
+
+
+    // Check LDAP uniqueness if provided
+    if (ldap) {
+      const existingLdap = await db
+        .select({ userId: usersTable.userId })
+        .from(usersTable)
+        .where(eq(usersTable.ldap, ldap));
+
+
+      if (existingLdap.length > 0) {
+        res.status(400).json({ error: "LDAP already exists for another user" });
+        return;
+      }
+    }
+
+
+    const hashed = await hashPassword(password);
+    const userId = randomUUID();
+
+
+    const [user] = await db
+      .insert(usersTable)
+      .values({
+        userId,
+        displayName,
+        username,
+        email,
+        password: hashed,
+        role: resolvedRole,
+        level: level ?? "L1",
+        teamId: resolvedTeamId,
+        ldap: ldap ?? null,
+        process: process ?? null,
+        vacoEmployeeCode: vacoEmployeeCode ?? null,
+        joiningDate: joiningDate ?? null,
+      })
+      .returning();
+
+
+    let teamName: string | null = null;
+    if (user.teamId) {
+      const [team] = await db.select().from(teamsTable).where(eq(teamsTable.teamId, user.teamId));
+      teamName = team?.teamName ?? null;
+    }
+
+
+    res.status(201).json(toUserResponse(user, teamName));
+  } catch (err) {
+    req.log.error(err, "Register user error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+router.get("/:userId", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const [user] = await db.select().from(usersTable).where(eq(usersTable.userId, String(req.params.userId)));
+    if (!user) {
+      res.status(404).json({ error: "Not Found" });
+      return;
+    }
+    let teamName: string | null = null;
+    if (user.teamId) {
+      const [team] = await db.select().from(teamsTable).where(eq(teamsTable.teamId, user.teamId));
+      teamName = team?.teamName ?? null;
+    }
+    res.json(toUserResponse(user, teamName));
+  } catch (err) {
+    req.log.error(err, "Get user error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+router.patch("/:userId", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role !== "Manager" && currentUser.role !== "Team Lead") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+
+    const { teamId, role, displayName, username, email, level, ldap, process, vacoEmployeeCode, joiningDate } = req.body;
+    const updates: Partial<typeof usersTable.$inferInsert> = {};
+
+
+    if (teamId !== undefined) updates.teamId = teamId;
+    if (role !== undefined && currentUser.role === "Manager") updates.role = role;
+    if (displayName !== undefined) updates.displayName = displayName;
+    if (username !== undefined) updates.username = username;
+    if (email !== undefined) updates.email = email;
+    if (level !== undefined) updates.level = level;
+    if (ldap !== undefined) updates.ldap = ldap;
+    if (process !== undefined) updates.process = process;
+    if (vacoEmployeeCode !== undefined) updates.vacoEmployeeCode = vacoEmployeeCode;
+    if (joiningDate !== undefined) updates.joiningDate = joiningDate;
+
+
+    // Check LDAP uniqueness if being updated
+    if (ldap) {
+      const existingLdap = await db
+        .select({ userId: usersTable.userId })
+        .from(usersTable)
+        .where(eq(usersTable.ldap, ldap));
+
+
+      if (existingLdap.length > 0 && existingLdap[0].userId !== req.params.userId) {
+        res.status(400).json({ error: "LDAP already exists for another user" });
+        return;
+      }
+    }
+
+
+    const [user] = await db
+      .update(usersTable)
+      .set(updates)
+      .where(eq(usersTable.userId, String(req.params.userId)))
+      .returning();
+
+
+    if (!user) {
+      res.status(404).json({ error: "Not Found" });
+      return;
+    }
+
+
+    let teamName: string | null = null;
+    if (user.teamId) {
+      const [team] = await db.select().from(teamsTable).where(eq(teamsTable.teamId, user.teamId));
+      teamName = team?.teamName ?? null;
+    }
+
+
+    res.json(toUserResponse(user, teamName));
+  } catch (err) {
+    req.log.error(err, "Update user error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+export default router;
+
+File: /home/chaudharyharshit/Employee-Performance-Hub/lib/api-client-react/src/generated/api.schemas.ts
+/**
+ * Generated by orval v8.5.3 🍺
+ * Do not edit manually.
+ * Api
+ * Employee Performance Rating API
+ * OpenAPI spec version: 0.1.0
+ */
+export interface HealthStatus {
+  status: string;
+}
+
+
+export interface ErrorResponse {
+  error: string;
+  message?: string;
+}
+
+
+export interface MessageResponse {
+  message: string;
+}
+
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+
+export type UserProfileRole =
+  (typeof UserProfileRole)[keyof typeof UserProfileRole];
+
+
+export const UserProfileRole = {
+  User: "User",
+  Team_Lead: "Team Lead",
+  Manager: "Manager",
+} as const;
+
+
+export type UserProfileLevel =
+  (typeof UserProfileLevel)[keyof typeof UserProfileLevel];
+
+
+export const UserProfileLevel = {
+  L1: "L1",
+  L2: "L2",
+  L3: "L3",
+} as const;
+
+
+export interface UserProfile {
+  userId: string;
+  displayName: string;
+  username: string;
+  email: string;
+  role: UserProfileRole;
+  level: UserProfileLevel;
+  teamId?: number | null;
+  teamName?: string | null;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface LoginResponse {
+  token: string;
+  user: UserProfile;
+}
+
+
+export interface UpdateUserRequest {
+  teamId?: number | null;
+  role?: string;
+  displayName?: string;
+  username?: string;
+  email?: string;
+  level?: string;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface Team {
+  teamId: number;
+  teamName: string;
+  tlUserId?: string | null;
+  managerUserId?: string | null;
+  tlDisplayName?: string | null;
+  managerDisplayName?: string | null;
+}
+
+
+export interface UpdateTeamRequest {
+  teamName?: string;
+  tlUserId?: string | null;
+  managerUserId?: string | null;
+}
+
+
+export interface RegisterUserRequest {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  role?: string;
+  level?: string;
+  teamId?: number | null;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface RatingItem {
+  itemId: number;
+  itemName: string;
+  description?: string | null;
+  teamId: number;
+  weight: number;
+  category?: string | null;
+  targetRole?: string | null;
+}
+
+
+export interface CreateItemRequest {
+  /** @maxLength 50 */
+  itemName: string;
+  /** @maxLength 200 */
+  description?: string;
+  teamId: number;
+  weight: number;
+  category?: string;
+  targetRole?: string;
+}
+
+
+export interface UpdateItemRequest {
+  /** @maxLength 50 */
+  itemName?: string;
+  /** @maxLength 200 */
+  description?: string;
+  weight?: number;
+  category?: string;
+  targetRole?: string;
+}
+
+
+export type RatingQuarter = (typeof RatingQuarter)[keyof typeof RatingQuarter];
+
+
+export const RatingQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface Rating {
+  ratingId: number;
+  itemId: number;
+  itemName?: string | null;
+  projectName?: string | null;
+  userId: string;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue: number;
+  comment?: string | null;
+  quarter: RatingQuarter;
+  year: number;
+  artifactLinks?: string | null;
+  createdOn: string;
+  category?: string | null;
+}
+
+
+export type SubmitRatingRequestQuarter =
+  (typeof SubmitRatingRequestQuarter)[keyof typeof SubmitRatingRequestQuarter];
+
+
+export const SubmitRatingRequestQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface SubmitRatingRequest {
+  itemId: number;
+  projectName?: string | null;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue: number;
+  comment?: string;
+  quarter: SubmitRatingRequestQuarter;
+  year: number;
+  artifactLinks?: string;
+}
+
+
+export interface UpdateRatingRequest {
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue?: number;
+  comment?: string;
+  artifactLinks?: string;
+}
+
+
+export interface CategoryScore {
+  category: string;
+  weight: number;
+  avgRating: number;
+  weightedContribution: number;
+}
+
+
+export interface RatingSummary {
+  userId: string;
+  displayName: string;
+  quarter: string;
+  year: number;
+  weightedScore: number;
+  performanceLabel: string;
+  categoryScores: CategoryScore[];
+}
+
+
+export type ApprovalTlLgtmStatus =
+  (typeof ApprovalTlLgtmStatus)[keyof typeof ApprovalTlLgtmStatus];
+
+
+export const ApprovalTlLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export type ApprovalFinalLgtmStatus =
+  (typeof ApprovalFinalLgtmStatus)[keyof typeof ApprovalFinalLgtmStatus];
+
+
+export const ApprovalFinalLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface Approval {
+  approvalId: number;
+  ratingId?: number;
+  itemId: number;
+  itemName?: string | null;
+  projectName?: string | null;
+  teamId: number;
+  ratedUserId: string;
+  ratedUserName?: string | null;
+  selfRatingValue?: number | null;
+  tlRatingValue?: number | null;
+  tlLgtmStatus: ApprovalTlLgtmStatus;
+  tlLgtmTimestamp?: string | null;
+  tlLgtmByUserId?: string | null;
+  finalLgtmStatus: ApprovalFinalLgtmStatus;
+  finalLgtmTimestamp?: string | null;
+  finalLgtmByUserId?: string | null;
+  disputeStatus: boolean;
+  disputeComment?: string | null;
+  quarter?: string | null;
+  year?: number | null;
+  category?: string | null;
+}
+
+
+export type CreateApprovalRequestQuarter =
+  (typeof CreateApprovalRequestQuarter)[keyof typeof CreateApprovalRequestQuarter];
+
+
+export const CreateApprovalRequestQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface CreateApprovalRequest {
+  itemId: number;
+  ratingId: number;
+  teamId: number;
+  ratedUserId: string;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  tlRatingValue: number;
+  quarter: CreateApprovalRequestQuarter;
+  year: number;
+}
+
+
+export type UpdateApprovalRequestFinalLgtmStatus =
+  (typeof UpdateApprovalRequestFinalLgtmStatus)[keyof typeof UpdateApprovalRequestFinalLgtmStatus];
+
+
+export const UpdateApprovalRequestFinalLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export type UpdateApprovalRequestTlLgtmStatus =
+  (typeof UpdateApprovalRequestTlLgtmStatus)[keyof typeof UpdateApprovalRequestTlLgtmStatus];
+
+
+export const UpdateApprovalRequestTlLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface UpdateApprovalRequest {
+  finalLgtmStatus?: UpdateApprovalRequestFinalLgtmStatus;
+  tlLgtmStatus?: UpdateApprovalRequestTlLgtmStatus;
+}
+
+
+export interface DisputeRequest {
+  disputeComment: string;
+}
+
+
+export type ResolveDisputeRequestResolution =
+  (typeof ResolveDisputeRequestResolution)[keyof typeof ResolveDisputeRequestResolution];
+
+
+export const ResolveDisputeRequestResolution = {
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface ResolveDisputeRequest {
+  resolution: ResolveDisputeRequestResolution;
+  comment?: string;
+}
+
+
+export interface SendReminderRequest {
+  teamId?: number;
+  /** If provided, sends reminder to this specific user only */
+  userId?: string;
+  /** If provided, sends reminders only to these specific users */
+  userIds?: string[];
+  deadline?: string;
+  customMessage?: string;
+}
+
+
+export interface RatingCycle {
+  teamId: number;
+  quarter: string;
+  year: number;
+  isOpen: boolean;
+}
+
+
+export interface UpdateRatingCycleRequest {
+  teamId: number;
+  quarter: string;
+  year: number;
+  isOpen: boolean;
+}
+
+
+export type ListUsersParams = {
+  teamId?: number;
+};
+
+
+export type ListItemsParams = {
+  teamId?: number;
+  targetRole?: string;
+};
+
+
+export type ListRatingsParams = {
+  userId?: string;
+  quarter?: ListRatingsQuarter;
+  fromQuarter?: ListRatingsFromQuarter;
+  toQuarter?: ListRatingsToQuarter;
+  year?: number;
+};
+
+
+export type ListRatingsQuarter =
+  (typeof ListRatingsQuarter)[keyof typeof ListRatingsQuarter];
+
+
+export const ListRatingsQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListRatingsFromQuarter =
+  (typeof ListRatingsFromQuarter)[keyof typeof ListRatingsFromQuarter];
+
+
+export const ListRatingsFromQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListRatingsToQuarter =
+  (typeof ListRatingsToQuarter)[keyof typeof ListRatingsToQuarter];
+
+
+export const ListRatingsToQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryParams = {
+  userId: string;
+  quarter?: GetRatingsSummaryQuarter;
+  fromQuarter?: GetRatingsSummaryFromQuarter;
+  toQuarter?: GetRatingsSummaryToQuarter;
+  year?: number;
+};
+
+
+export type GetRatingsSummaryQuarter =
+  (typeof GetRatingsSummaryQuarter)[keyof typeof GetRatingsSummaryQuarter];
+
+
+export const GetRatingsSummaryQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryFromQuarter =
+  (typeof GetRatingsSummaryFromQuarter)[keyof typeof GetRatingsSummaryFromQuarter];
+
+
+export const GetRatingsSummaryFromQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryToQuarter =
+  (typeof GetRatingsSummaryToQuarter)[keyof typeof GetRatingsSummaryToQuarter];
+
+
+export const GetRatingsSummaryToQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListApprovalsParams = {
+  ratedUserId?: string;
+  teamId?: number;
+  quarter?: string;
+  year?: number;
+};
+
+
+export type ListDisputesParams = {
+  teamId?: number;
+};
+
+
+export type GetRatingCycleParams = {
+  teamId: number;
+  quarter: string;
+  year: number;
+};
+File path /home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/components/layout.tsx
+import { ReactNode, useEffect, useState } from "react";
+import { useAuth } from "@/lib/auth";
+import { Link, useLocation } from "wouter";
+import { Button } from "@/components/ui/button";
+import {
+  LogOut, LayoutDashboard, ClipboardList, Users, CheckSquare,
+  Settings, UserCheck, GitBranch, ShieldCheck, Moon, Sun, Menu, X, Star, UserPlus
+} from "lucide-react";
+import { clsx } from "clsx";
+
+
+interface NavItem {
+  href: string;
+  icon: ReactNode;
+  label: string;
+  roles: string[];
+}
+
+
+const navItems: NavItem[] = [
+  { href: "/dashboard",      icon: <LayoutDashboard className="w-5 h-5" />, label: "Dashboard",       roles: ["User", "Team Lead", "Manager"] },
+  { href: "/submit-rating",  icon: <Star className="w-5 h-5" />,            label: "Submit Rating",   roles: ["User", "Team Lead", "Manager"] },
+  { href: "/my-team",        icon: <Users className="w-5 h-5" />,           label: "My Team",         roles: ["Team Lead"] },
+  { href: "/approve-ratings",icon: <CheckSquare className="w-5 h-5" />,     label: "Approve Ratings", roles: ["Team Lead", "Manager"] },
+  { href: "/manage-kpis",    icon: <ClipboardList className="w-5 h-5" />,    label: "Manage KPIs",     roles: ["Team Lead", "Manager"] },
+  { href: "/manage-leads",   icon: <UserCheck className="w-5 h-5" />,       label: "Manage Leads",    roles: ["Manager"] },
+  { href: "/manage-team",    icon: <Settings className="w-5 h-5" />,        label: "Manage Team",     roles: ["Team Lead", "Manager"] },
+  { href: "/rate-tls",       icon: <UserCheck className="w-5 h-5" />,       label: "Rate Team Leads", roles: ["Manager"] },
+  { href: "/reassign-leads", icon: <GitBranch className="w-5 h-5" />,       label: "Reassign Leads",  roles: ["Manager"] },
+  { href: "/final-approvals",icon: <ShieldCheck className="w-5 h-5" />,     label: "Final Approvals", roles: ["Manager"] },
+];
+
+
+export function Layout({ children }: { children: ReactNode }) {
+  const { user, logout } = useAuth();
+  const [location] = useLocation();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(
+    (localStorage.getItem("theme") as "light" | "dark") || "light"
+  );
+
+
+  useEffect(() => {
+    document.documentElement.classList.remove("light", "dark");
+    document.documentElement.classList.add(theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+
+  const visibleNav = navItems.filter(n => user?.role && n.roles.includes(user.role));
+
+
+  return (
+    <div className="min-h-screen bg-background flex">
+
+
+      {/* Overlay for mobile */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 z-30 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+
+      {/* Sidebar */}
+      <aside className={clsx(
+        "fixed top-0 left-0 h-full w-64 bg-card border-r border-border/50 flex flex-col z-40 shadow-lg",
+        "transition-transform duration-300 ease-in-out",
+        sidebarOpen ? "translate-x-0" : "-translate-x-full",
+        "md:relative md:translate-x-0 md:shadow-none md:flex"
+      )}>
+        {/* Logo */}
+        <div className="p-5 flex items-center justify-between border-b border-border/30">
+          <div className="flex items-center gap-2">
+            <div className="bg-white rounded-lg p-1 shadow-sm">
+              <img
+                src="https://www.highspring.com/wp-content/uploads/sites/2/2025/01/HS-black-logo.svg"
+                alt="HighSpring"
+                className="h-7 w-auto"
+              />
+            </div>
+            <span className="font-bold text-base text-foreground">Performance</span>
+          </div>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="md:hidden text-muted-foreground hover:text-foreground"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          {visibleNav.map(item => (
+            <Link key={item.href} href={item.href} onClick={() => setSidebarOpen(false)}>
+              <span className={clsx(
+                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 cursor-pointer",
+                location === item.href
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+              )}>
+                {item.icon}
+                {item.label}
+              </span>
+            </Link>
+          ))}
+        </nav>
+
+
+        {/* User footer */}
+        <div className="p-4 border-t border-border/30 bg-secondary/20 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm shrink-0">
+                {user?.displayName.charAt(0)}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold truncate">{user?.displayName}</p>
+                <p className="text-xs text-muted-foreground">{user?.role} · {user?.level}</p>
+              </div>
+            </div>
+            <Button variant="ghost" size="icon" onClick={() => setTheme(theme === "light" ? "dark" : "light")} className="shrink-0 rounded-full">
+              {theme === "light" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            </Button>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
+            onClick={logout}
+          >
+            <LogOut className="w-4 h-4 mr-2" /> Sign Out
+          </Button>
+        </div>
+      </aside>
+
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Topbar (mobile) */}
+        <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-card border-b border-border/30 sticky top-0 z-20">
+          <button onClick={() => setSidebarOpen(true)} className="text-muted-foreground hover:text-foreground">
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="bg-white rounded px-1 py-0.5">
+            <img
+              src="https://www.highspring.com/wp-content/uploads/sites/2/2025/01/HS-black-logo.svg"
+              alt="HighSpring"
+              className="h-5 w-auto"
+            />
+          </div>
+          <span className="font-semibold text-sm">Performance</span>
+        </header>
+
+
+        <main className="flex-1 overflow-x-hidden overflow-y-auto">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/App.tsx
+
+
+import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AuthProvider } from "@/lib/auth";
+import { setupFetchInterceptor } from "@/lib/fetch-interceptor";
+import { setAuthTokenGetter } from "@workspace/api-client-react";
+import NotFound from "@/pages/not-found";
+import Login from "@/pages/login";
+import Dashboard from "@/pages/dashboard";
+import SubmitRating from "@/pages/submit-rating";
+import MyTeam from "@/pages/my-team";
+import ApproveRatings from "@/pages/approve-ratings";
+import ManageTeam from "@/pages/manage-team";
+import RateTLs from "@/pages/rate-tls";
+import ReassignLeads from "@/pages/reassign-leads";
+import FinalApprovals from "@/pages/final-approvals";
+import ManageKPIs from "@/pages/manage-kpis";
+import ManageLeads from "@/pages/manage-leads";
+
+
+// setupFetchInterceptor();
+
+
+// Set up auth token getter for API client
+setAuthTokenGetter(() => {
+  return localStorage.getItem("token");
+});
+
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
+});
+
+
+function Router() {
+  return (
+    <Switch>
+      <Route path="/" component={() => <Redirect to="/dashboard" />} />
+      <Route path="/login" component={Login} />
+      <Route path="/dashboard" component={Dashboard} />
+      <Route path="/submit-rating" component={SubmitRating} />
+      <Route path="/my-team" component={MyTeam} />
+      <Route path="/approve-ratings" component={ApproveRatings} />
+      <Route path="/manage-team" component={ManageTeam} />
+      <Route path="/rate-tls" component={RateTLs} />
+      <Route path="/reassign-leads" component={ReassignLeads} />
+      <Route path="/final-approvals" component={FinalApprovals} />
+      <Route path="/manage-kpis" component={ManageKPIs} />
+      <Route path="/manage-leads" component={ManageLeads} />
+      <Route component={NotFound} />
+    </Switch>
+  );
+}
+
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+          <AuthProvider>
+            <Router />
+          </AuthProvider>
+        </WouterRouter>
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/pages/manage-team.tsx
+import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth";
+import { Layout } from "@/components/layout";
+import { useListUsers, useUpdateUser, useRegisterUser, useGetRatingCycle, useSetRatingCycle, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { Settings, UserMinus, CalendarClock, Plus, Pencil, Mail, ShieldCheck, Bell } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+
+interface UserForm {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  level: string;
+  ldap: string;
+  process: string;
+  vacoEmployeeCode: string;
+  joiningDate: string;
+}
+
+
+const emptyForm: UserForm = {
+  displayName: "",
+  username: "",
+  email: "",
+  password: "",
+  level: "L1",
+  ldap: "",
+  process: "",
+  vacoEmployeeCode: "",
+  joiningDate: "",
+};
+
+
+const LEVELS = ["L1", "L2", "L3"];
+
+
+export default function ManageTeam() {
+  const { user, token, isLoading } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+
+  // Remove dialog
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+
+  // Add User dialog
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addForm, setAddForm] = useState<UserForm>(emptyForm);
+
+
+  // Edit User dialog
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<UserForm>(emptyForm);
+
+
+  // Reminder dialog
+  const [reminderOpen, setReminderOpen] = useState(false);
+  const [reminderDeadline, setReminderDeadline] = useState("");
+  const [reminderMsg, setReminderMsg] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectAll, setSelectAll] = useState(true);
+
+
+  useEffect(() => {
+    if (!isLoading && !token) setLocation("/login");
+    if (!isLoading && user && user.role === "User") setLocation("/dashboard");
+  }, [isLoading, token, user, setLocation]);
+
+
+  const { data: members, isLoading: loadingMembers } = useListUsers(
+    user?.teamId ? { teamId: user.teamId } : undefined,
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: updateUser, isPending } = useUpdateUser();
+  const { mutate: registerUser, isPending: isRegistering } = useRegisterUser();
+  const { mutate: sendReminder, isPending: isSending } = useSendReminder();
+
+
+  const currentYear = new Date().getFullYear();
+  const [cycleQ, setCycleQ] = useState<RatingQuarter>(RatingQuarter.Q1);
+  const [cycleY, setCycleY] = useState<number>(currentYear);
+
+
+  const { data: cycleData, isLoading: loadingCycle } = useGetRatingCycle(
+    { teamId: user?.teamId!, quarter: cycleQ, year: cycleY },
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: setCycle, isPending: isSettingCycle } = useSetRatingCycle();
+
+
+  const handleToggleCycle = (checked: boolean) => {
+    if (!user?.teamId) return;
+    setCycle({ data: { teamId: user.teamId, quarter: cycleQ, year: cycleY, isOpen: checked } }, {
+      onSuccess: () => {
+        toast({ title: `Quarter submissions ${checked ? "opened" : "closed"}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/rating-cycles"] });
+      },
+      onError: () => toast({ title: "Failed to update cycle status", variant: "destructive" })
+    });
+  };
+
+
+  const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+
+
+  // --- Reminder ---
+  const openReminderModal = () => {
+    const ids = teamMembers.map(m => m.userId);
+    setSelectedUserIds(ids);
+    setSelectAll(true);
+    setReminderDeadline("");
+    setReminderMsg("");
+    setReminderOpen(true);
+  };
+
+
+  const handleToggleSelectAll = (checked: boolean) => {
+    setSelectAll(checked);
+    setSelectedUserIds(checked ? teamMembers.map(m => m.userId) : []);
+  };
+
+
+  const handleToggleMember = (userId: string, checked: boolean) => {
+    setSelectedUserIds(prev =>
+      checked ? [...prev, userId] : prev.filter(id => id !== userId)
+    );
+    setSelectAll(false);
+  };
+
+
+  const handleSendReminder = () => {
+    if (!user?.teamId || selectedUserIds.length === 0) return;
+    sendReminder({
+      data: {
+        teamId: user.teamId,
+        userIds: selectedUserIds,
+        deadline: reminderDeadline || undefined,
+        customMessage: reminderMsg || undefined,
+      }
+    }, {
+      onSuccess: (data) => {
+        toast({ title: (data as any).message ?? "Reminders sent" });
+        setReminderOpen(false);
+      },
+      onError: () => toast({ title: "Failed to send reminders", variant: "destructive" })
+    });
+  };
+
+
+  // --- Remove ---
+  const handleRemove = () => {
+    if (!removingId) return;
+    updateUser({ userId: removingId, data: { teamId: null } }, {
+      onSuccess: () => {
+        toast({ title: "Member removed from team" });
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+        setRemovingId(null);
+      },
+      onError: () => toast({ title: "Failed to remove member", variant: "destructive" })
+    });
+  };
+
+
+  // --- Add User ---
+  const setAdd = (field: keyof UserForm, value: string) =>
+    setAddForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleCreate = () => {
+    if (!addForm.displayName || !addForm.username || !addForm.email || !addForm.password) {
+      toast({ title: "Full Name, Username, Email, and Password are required", variant: "destructive" });
+      return;
+    }
+    registerUser({
+      data: {
+        displayName: addForm.displayName.trim(),
+        username: addForm.username.trim(),
+        email: addForm.email.trim(),
+        password: addForm.password,
+        role: "User",
+        level: addForm.level,
+        teamId: user?.teamId ?? null,
+        ldap: addForm.ldap.trim() || null,
+        process: addForm.process.trim() || null,
+        vacoEmployeeCode: addForm.vacoEmployeeCode.trim() || null,
+        joiningDate: addForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: (newUser) => {
+        toast({ title: `${newUser.displayName} added to your team` });
+        setAddDialogOpen(false);
+        setAddForm(emptyForm);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to create user",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  // --- Edit User ---
+  const openEdit = (m: typeof teamMembers[0]) => {
+    setEditingId(m.userId);
+    setEditForm({
+      displayName: m.displayName,
+      username: m.username,
+      email: m.email,
+      password: "",
+      level: m.level,
+      ldap: (m as any).ldap ?? "",
+      process: (m as any).process ?? "",
+      vacoEmployeeCode: (m as any).vacoEmployeeCode ?? "",
+      joiningDate: (m as any).joiningDate ?? "",
+    });
+    setEditDialogOpen(true);
+  };
+
+
+  const setEdit = (field: keyof UserForm, value: string) =>
+    setEditForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleUpdate = () => {
+    if (!editingId) return;
+    if (!editForm.displayName || !editForm.username || !editForm.email) {
+      toast({ title: "Full Name, Username, and Email are required", variant: "destructive" });
+      return;
+    }
+    updateUser({
+      userId: editingId,
+      data: {
+        displayName: editForm.displayName.trim(),
+        username: editForm.username.trim(),
+        email: editForm.email.trim(),
+        level: editForm.level,
+        ldap: editForm.ldap.trim() || null,
+        process: editForm.process.trim() || null,
+        vacoEmployeeCode: editForm.vacoEmployeeCode.trim() || null,
+        joiningDate: editForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: () => {
+        toast({ title: "Member updated successfully" });
+        setEditDialogOpen(false);
+        setEditingId(null);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to update member",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
+
+
+  const memberToRemove = members?.find(m => m.userId === removingId);
+
+
+  return (
+    <Layout>
+      <div className="p-6 max-w-3xl mx-auto space-y-6">
+        {/* Header Card with Add User button */}
+        <div className="bg-card p-5 rounded-2xl border border-border/50 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+                <Settings className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold">Manage Team</h1>
+                <p className="text-muted-foreground text-sm">{user.teamName || "Your team"} · {teamMembers.length} member(s)</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="outline"
+                onClick={openReminderModal}
+                id="send-reminder-btn"
+              >
+                <Bell className="w-4 h-4 mr-1.5" /> Send Reminder
+              </Button>
+              <Button
+                onClick={() => { setAddForm(emptyForm); setAddDialogOpen(true); }}
+                id="add-user-btn"
+              >
+                <Plus className="w-4 h-4 mr-1.5" /> Add User
+              </Button>
+            </div>
+          </div>
+        </div>
+
+
+        {/* Submission Cycle Management */}
+        <Card className="p-5 border-border/50 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <CalendarClock className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold">Submission Cycle Management</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Toggle the status to Open or Close the submission window for a specific quarter. When closed, members cannot submit or edit ratings for that quarter.
+          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-secondary/20 rounded-xl border">
+            <div className="flex items-center gap-3">
+              <Select value={cycleQ} onValueChange={(v) => setCycleQ(v as RatingQuarter)}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(["Q1","Q2","Q3","Q4"] as const).map(q => <SelectItem key={q} value={q}>{q}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={cycleY.toString()} onValueChange={(v) => setCycleY(parseInt(v))}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[currentYear - 1, currentYear, currentYear + 1, currentYear + 2].map(y => (
+                    <SelectItem key={y} value={y.toString()}>{y}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="cycle-toggle" className="text-sm font-medium">
+                {loadingCycle ? "Loading..." : cycleData?.isOpen ? (
+                  <span className="text-emerald-600 dark:text-emerald-400">Open</span>
+                ) : (
+                  <span className="text-muted-foreground">Closed</span>
+                )}
+              </Label>
+              <Switch
+                id="cycle-toggle"
+                checked={!!cycleData?.isOpen}
+                onCheckedChange={handleToggleCycle}
+                disabled={loadingCycle || isSettingCycle}
+              />
+            </div>
+          </div>
+        </Card>
+
+
+        {/* Team Members */}
+        {loadingMembers ? (
+          <div className="text-center py-12 text-muted-foreground">Loading...</div>
+        ) : teamMembers.length === 0 ? (
+          <Card className="p-12 text-center border-dashed">
+            <Settings className="w-12 h-12 mx-auto text-muted-foreground/40 mb-3" />
+            <p className="text-muted-foreground">No team members yet. Add the first one using the button above.</p>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {teamMembers.map(m => (
+              <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
+                    {m.displayName.charAt(0)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-semibold truncate">{m.displayName}</p>
+                    <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
+                    {(m as any).ldap && (
+                      <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-primary border-primary/20 hover:bg-primary/10"
+                    onClick={() => openEdit(m)}
+                    id={`edit-user-${m.userId}`}
+                  >
+                    <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                    onClick={() => setRemovingId(m.userId)}
+                    id={`remove-user-${m.userId}`}
+                  >
+                    <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+
+      {/* Remove Confirmation Dialog */}
+      <AlertDialog open={!!removingId} onOpenChange={(o) => !o && setRemovingId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Team Member</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove <strong>{memberToRemove?.displayName}</strong> from your team? They will no longer be assigned to a team.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRemove} disabled={isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+
+      {/* Add User Dialog */}
+      <Dialog open={addDialogOpen} onOpenChange={v => { if (!v) { setAddDialogOpen(false); setAddForm(emptyForm); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="w-5 h-5" /> Add New User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="a-displayName" placeholder="e.g. Jane Doe" value={addForm.displayName} onChange={e => setAdd("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="a-username" placeholder="e.g. jane.doe" value={addForm.username} onChange={e => setAdd("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-email" type="email" placeholder="jane@example.com" value={addForm.email} onChange={e => setAdd("email", e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-password" className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> Password <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-password" type="password" placeholder="Minimum 6 characters" value={addForm.password} onChange={e => setAdd("password", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={addForm.level} onValueChange={v => setAdd("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-ldap">LDAP</Label>
+                <Input id="a-ldap" placeholder="e.g. jane.doe@corp" value={addForm.ldap} onChange={e => setAdd("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-process">Process</Label>
+                <Input id="a-process" placeholder="e.g. SCIM" value={addForm.process} onChange={e => setAdd("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-vaco">Vaco Employee Code</Label>
+                <Input id="a-vaco" placeholder="e.g. EMP-1234" value={addForm.vacoEmployeeCode} onChange={e => setAdd("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-joiningDate">Joining Date</Label>
+              <Input id="a-joiningDate" type="date" value={addForm.joiningDate} onChange={e => setAdd("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setAddDialogOpen(false); setAddForm(emptyForm); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={isRegistering}>
+              {isRegistering ? "Creating..." : "Create User"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Edit User Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={v => { if (!v) { setEditDialogOpen(false); setEditingId(null); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="w-5 h-5" /> Edit User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="e-displayName" placeholder="e.g. Jane Doe" value={editForm.displayName} onChange={e => setEdit("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="e-username" placeholder="e.g. jane.doe" value={editForm.username} onChange={e => setEdit("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="e-email" type="email" placeholder="jane@example.com" value={editForm.email} onChange={e => setEdit("email", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={editForm.level} onValueChange={v => setEdit("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-ldap">LDAP</Label>
+                <Input id="e-ldap" placeholder="e.g. jane.doe@corp" value={editForm.ldap} onChange={e => setEdit("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-process">Process</Label>
+                <Input id="e-process" placeholder="e.g. SCIM" value={editForm.process} onChange={e => setEdit("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-vaco">Vaco Employee Code</Label>
+                <Input id="e-vaco" placeholder="e.g. EMP-1234" value={editForm.vacoEmployeeCode} onChange={e => setEdit("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-joiningDate">Joining Date</Label>
+              <Input id="e-joiningDate" type="date" value={editForm.joiningDate} onChange={e => setEdit("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setEditDialogOpen(false); setEditingId(null); }}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={isPending}>
+              {isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Send Reminder Dialog */}
+      <Dialog open={reminderOpen} onOpenChange={(v) => { if (!v) setReminderOpen(false); }}>
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bell className="w-4 h-4" /> Send Rating Reminder
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-1">
+            {/* Recipients */}
+            <div className="space-y-2">
+              <Label className="text-sm font-semibold">Select Recipients</Label>
+              <div className="border rounded-lg overflow-hidden">
+                {/* Select All */}
+                <label className="flex items-center gap-3 px-3 py-2.5 bg-secondary/30 border-b cursor-pointer hover:bg-secondary/50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={selectAll && selectedUserIds.length === teamMembers.length}
+                    onChange={e => handleToggleSelectAll(e.target.checked)}
+                    className="w-4 h-4 rounded accent-primary"
+                  />
+                  <span className="text-sm font-medium">Select All ({teamMembers.length})</span>
+                </label>
+                {/* Member list */}
+                <div className="max-h-48 overflow-y-auto divide-y">
+                  {teamMembers.map(m => (
+                    <label
+                      key={m.userId}
+                      className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-secondary/20 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedUserIds.includes(m.userId)}
+                        onChange={e => handleToggleMember(m.userId, e.target.checked)}
+                        className="w-4 h-4 rounded accent-primary"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{m.displayName}</p>
+                        <p className="text-xs text-muted-foreground truncate">{m.email}</p>
+                      </div>
+                    </label>
+                  ))}
+                  {teamMembers.length === 0 && (
+                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">No team members found</p>
+                  )}
+                </div>
+              </div>
+              {selectedUserIds.length === 0 && (
+                <p className="text-xs text-destructive">Select at least one recipient to send reminders.</p>
+              )}
+            </div>
+            {/* Deadline */}
+            <div className="space-y-1.5">
+              <Label>Deadline Date (optional)</Label>
+              <Input type="date" value={reminderDeadline} onChange={e => setReminderDeadline(e.target.value)} />
+            </div>
+            {/* Message */}
+            <div className="space-y-1.5">
+              <Label>Custom Message (optional)</Label>
+              <Textarea
+                placeholder="Leave blank to use the default reminder message..."
+                value={reminderMsg}
+                onChange={e => setReminderMsg(e.target.value)}
+                className="resize-none h-24"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReminderOpen(false)}>Cancel</Button>
+            <Button
+              onClick={handleSendReminder}
+              disabled={isSending || selectedUserIds.length === 0}
+              id="confirm-send-reminder-btn"
+            >
+              {isSending ? "Sending..." : `Send to ${selectedUserIds.length} member(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Layout>
+  );
+}
+File Path: /home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/pages/manage-leads.tsx
+import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth";
+import { Layout } from "@/components/layout";
+import { useListUsers, useListTeams, useRegisterUser, useUpdateUser } from "@workspace/api-client-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { UserCheck, Plus, Mail, ShieldCheck, Pencil, UserMinus } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+
+interface LeadForm {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  level: string;
+  teamId: string;
+  ldap: string;
+  process: string;
+  vacoEmployeeCode: string;
+  joiningDate: string;
+}
+
+
+const emptyForm: LeadForm = {
+  displayName: "",
+  username: "",
+  email: "",
+  password: "",
+  level: "L2",
+  teamId: "",
+  ldap: "",
+  process: "",
+  vacoEmployeeCode: "",
+  joiningDate: "",
+};
+
+
+const LEVELS = ["L1", "L2", "L3"];
+
+
+export default function ManageLeads() {
+  const { user, token, isLoading } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+
+  // Add/Edit dialog state
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addForm, setAddForm] = useState<LeadForm>(emptyForm);
+
+
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<LeadForm>(emptyForm);
+
+
+  // Remove dialog state
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+
+  useEffect(() => {
+    if (!isLoading && !token) setLocation("/login");
+    if (!isLoading && user && user.role !== "Manager") setLocation("/dashboard");
+  }, [isLoading, token, user, setLocation]);
+
+
+  const { data: allUsers, isLoading: usersLoading } = useListUsers(
+    undefined,
+    { query: { enabled: user?.role === "Manager" } }
+  );
+
+
+  const { data: teams } = useListTeams({ query: { enabled: user?.role === "Manager" } });
+
+
+  const { mutate: registerUser, isPending: isRegistering } = useRegisterUser();
+  const { mutate: updateUser, isPending: isUpdating } = useUpdateUser();
+
+
+  const leads = (allUsers ?? []).filter(u => u.role === "Team Lead");
+  const teamMap = new Map((teams ?? []).map(t => [t.teamId, t.teamName]));
+
+
+  const leadToRemove = allUsers?.find(u => u.userId === removingId);
+
+
+  // --- Add Lead ---
+  const setAdd = (field: keyof LeadForm, value: string) =>
+    setAddForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleCreate = () => {
+    if (!addForm.displayName || !addForm.username || !addForm.email || !addForm.password) {
+      toast({ title: "Full Name, Username, Email, and Password are required", variant: "destructive" });
+      return;
+    }
+    registerUser({
+      data: {
+        displayName: addForm.displayName.trim(),
+        username: addForm.username.trim(),
+        email: addForm.email.trim(),
+        password: addForm.password,
+        role: "Team Lead",
+        level: addForm.level,
+        teamId: addForm.teamId ? Number(addForm.teamId) : null,
+        ldap: addForm.ldap.trim() || null,
+        process: addForm.process.trim() || null,
+        vacoEmployeeCode: addForm.vacoEmployeeCode.trim() || null,
+        joiningDate: addForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: (newUser) => {
+        toast({ title: `${newUser.displayName} created as Team Lead` });
+        setAddDialogOpen(false);
+        setAddForm(emptyForm);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to create Team Lead",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  // --- Edit Lead ---
+  const openEdit = (lead: typeof leads[0]) => {
+    setEditingId(lead.userId);
+    setEditForm({
+      displayName: lead.displayName,
+      username: lead.username,
+      email: lead.email,
+      password: "",
+      level: lead.level,
+      teamId: lead.teamId?.toString() ?? "",
+      ldap: (lead as any).ldap ?? "",
+      process: (lead as any).process ?? "",
+      vacoEmployeeCode: (lead as any).vacoEmployeeCode ?? "",
+      joiningDate: (lead as any).joiningDate ?? "",
+    });
+    setEditDialogOpen(true);
+  };
+
+
+  const setEdit = (field: keyof LeadForm, value: string) =>
+    setEditForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleUpdate = () => {
+    if (!editingId) return;
+    if (!editForm.displayName || !editForm.username || !editForm.email) {
+      toast({ title: "Full Name, Username, and Email are required", variant: "destructive" });
+      return;
+    }
+    updateUser({
+      userId: editingId,
+      data: {
+        displayName: editForm.displayName.trim(),
+        username: editForm.username.trim(),
+        email: editForm.email.trim(),
+        level: editForm.level,
+        teamId: editForm.teamId ? Number(editForm.teamId) : null,
+        ldap: editForm.ldap.trim() || null,
+        process: editForm.process.trim() || null,
+        vacoEmployeeCode: editForm.vacoEmployeeCode.trim() || null,
+        joiningDate: editForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: () => {
+        toast({ title: "Team Lead updated successfully" });
+        setEditDialogOpen(false);
+        setEditingId(null);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to update Team Lead",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  // --- Remove Lead ---
+  const handleRemove = () => {
+    if (!removingId) return;
+    updateUser({ userId: removingId, data: { teamId: null } }, {
+      onSuccess: () => {
+        toast({ title: "Team Lead removed from team" });
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+        setRemovingId(null);
+      },
+      onError: () => toast({ title: "Failed to remove Team Lead", variant: "destructive" })
+    });
+  };
+
+
+  if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
+
+
+  return (
+    <Layout>
+      <div className="p-6 max-w-4xl mx-auto space-y-6">
+        {/* Header Card */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-card p-5 rounded-2xl shadow-sm border border-border/50">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+              <UserCheck className="w-5 h-5 text-primary" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold">Manage Team Leads</h1>
+              <p className="text-muted-foreground text-sm">Create and manage Team Leads across your organization · {leads.length} lead(s)</p>
+            </div>
+          </div>
+          <Button onClick={() => { setAddForm(emptyForm); setAddDialogOpen(true); }} className="shrink-0" id="add-lead-btn">
+            <Plus className="w-4 h-4 mr-1.5" /> Add Team Lead
+          </Button>
+        </div>
+
+
+        {/* Leads Cards */}
+        {usersLoading ? (
+          <div className="text-center py-12 text-muted-foreground">Loading Team Leads...</div>
+        ) : leads.length === 0 ? (
+          <Card className="p-12 text-center border-dashed">
+            <UserCheck className="w-12 h-12 mx-auto text-muted-foreground/40 mb-3" />
+            <p className="text-muted-foreground">No Team Leads yet. Add the first one using the button above.</p>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {leads.map(lead => (
+              <Card key={lead.userId} className="p-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-full bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 flex items-center justify-center font-bold shrink-0">
+                    {lead.displayName.charAt(0)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-semibold truncate">{lead.displayName}</p>
+                    <p className="text-sm text-muted-foreground truncate">
+                      {lead.email} · {lead.level}
+                    </p>
+                    <p className="text-xs text-muted-foreground/70 truncate">
+                      Team: {lead.teamId ? teamMap.get(lead.teamId) ?? `#${lead.teamId}` : "Unassigned"}
+                      {(lead as any).ldap ? ` · LDAP: ${(lead as any).ldap}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-primary border-primary/20 hover:bg-primary/10"
+                    onClick={() => openEdit(lead)}
+                    id={`edit-lead-${lead.userId}`}
+                  >
+                    <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                    onClick={() => setRemovingId(lead.userId)}
+                    id={`remove-lead-${lead.userId}`}
+                  >
+                    <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+
+      {/* Remove Confirmation Dialog */}
+      <AlertDialog open={!!removingId} onOpenChange={(o) => !o && setRemovingId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Team Lead</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove <strong>{leadToRemove?.displayName}</strong> from their team? They will be unassigned.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRemove} disabled={isUpdating} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+
+      {/* Add Lead Dialog */}
+      <Dialog open={addDialogOpen} onOpenChange={v => { if (!v) { setAddDialogOpen(false); setAddForm(emptyForm); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="w-5 h-5" /> Add New Team Lead
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="al-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="al-displayName" placeholder="e.g. John Smith" value={addForm.displayName} onChange={e => setAdd("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="al-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="al-username" placeholder="e.g. john.smith" value={addForm.username} onChange={e => setAdd("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="al-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="al-email" type="email" placeholder="john@example.com" value={addForm.email} onChange={e => setAdd("email", e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="al-password" className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> Password <span className="text-destructive">*</span>
+              </Label>
+              <Input id="al-password" type="password" placeholder="Minimum 6 characters" value={addForm.password} onChange={e => setAdd("password", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={addForm.level} onValueChange={v => setAdd("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Assign to Team</Label>
+                <Select value={addForm.teamId} onValueChange={v => setAdd("teamId", v)}>
+                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">None</SelectItem>
+                    {(teams ?? []).map(t => (
+                      <SelectItem key={t.teamId} value={t.teamId.toString()}>{t.teamName}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="al-ldap">LDAP</Label>
+                <Input id="al-ldap" placeholder="e.g. john.smith@corp" value={addForm.ldap} onChange={e => setAdd("ldap", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="al-vaco">Vaco Employee Code</Label>
+                <Input id="al-vaco" placeholder="e.g. EMP-1234" value={addForm.vacoEmployeeCode} onChange={e => setAdd("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="al-process">Process</Label>
+                <Input id="al-process" placeholder="e.g. SCIM" value={addForm.process} onChange={e => setAdd("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="al-joiningDate">Joining Date</Label>
+                <Input id="al-joiningDate" type="date" value={addForm.joiningDate} onChange={e => setAdd("joiningDate", e.target.value)} />
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setAddDialogOpen(false); setAddForm(emptyForm); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={isRegistering}>
+              {isRegistering ? "Creating..." : "Create Team Lead"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Edit Lead Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={v => { if (!v) { setEditDialogOpen(false); setEditingId(null); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="w-5 h-5" /> Edit Team Lead
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="el-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="el-displayName" placeholder="e.g. John Smith" value={editForm.displayName} onChange={e => setEdit("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="el-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="el-username" placeholder="e.g. john.smith" value={editForm.username} onChange={e => setEdit("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="el-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="el-email" type="email" placeholder="john@example.com" value={editForm.email} onChange={e => setEdit("email", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={editForm.level} onValueChange={v => setEdit("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label>Assign to Team</Label>
+                <Select value={editForm.teamId} onValueChange={v => setEdit("teamId", v)}>
+                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">None</SelectItem>
+                    {(teams ?? []).map(t => (
+                      <SelectItem key={t.teamId} value={t.teamId.toString()}>{t.teamName}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="el-ldap">LDAP</Label>
+                <Input id="el-ldap" placeholder="e.g. john.smith@corp" value={editForm.ldap} onChange={e => setEdit("ldap", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="el-vaco">Vaco Employee Code</Label>
+                <Input id="el-vaco" placeholder="e.g. EMP-1234" value={editForm.vacoEmployeeCode} onChange={e => setEdit("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="el-process">Process</Label>
+                <Input id="el-process" placeholder="e.g. SCIM" value={editForm.process} onChange={e => setEdit("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="el-joiningDate">Joining Date</Label>
+                <Input id="el-joiningDate" type="date" value={editForm.joiningDate} onChange={e => setEdit("joiningDate", e.target.value)} />
+              </div>
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setEditDialogOpen(false); setEditingId(null); }}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={isUpdating}>
+              {isUpdating ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Layout>
+  );
+}
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/components/layout.tsx
+import { ReactNode, useEffect, useState } from "react";
+import { useAuth } from "@/lib/auth";
+import { Link, useLocation } from "wouter";
+import { Button } from "@/components/ui/button";
+import {
+  LogOut, LayoutDashboard, ClipboardList, Users, CheckSquare,
+  Settings, UserCheck, GitBranch, ShieldCheck, Moon, Sun, Menu, X, Star, UserPlus
+} from "lucide-react";
+import { clsx } from "clsx";
+
+
+interface NavItem {
+  href: string;
+  icon: ReactNode;
+  label: string;
+  roles: string[];
+}
+
+
+const navItems: NavItem[] = [
+  { href: "/dashboard",      icon: <LayoutDashboard className="w-5 h-5" />, label: "Dashboard",       roles: ["User", "Team Lead", "Manager"] },
+  { href: "/submit-rating",  icon: <Star className="w-5 h-5" />,            label: "Submit Rating",   roles: ["User", "Team Lead", "Manager"] },
+  { href: "/my-team",        icon: <Users className="w-5 h-5" />,           label: "My Team",         roles: ["Team Lead"] },
+  { href: "/approve-ratings",icon: <CheckSquare className="w-5 h-5" />,     label: "Approve Ratings", roles: ["Team Lead", "Manager"] },
+  { href: "/manage-kpis",    icon: <ClipboardList className="w-5 h-5" />,    label: "Manage KPIs",     roles: ["Team Lead", "Manager"] },
+  { href: "/manage-leads",   icon: <UserCheck className="w-5 h-5" />,       label: "Manage Leads",    roles: ["Manager"] },
+  { href: "/manage-team",    icon: <Settings className="w-5 h-5" />,        label: "Manage Team",     roles: ["Team Lead", "Manager"] },
+  { href: "/rate-tls",       icon: <UserCheck className="w-5 h-5" />,       label: "Rate Team Leads", roles: ["Manager"] },
+  { href: "/reassign-leads", icon: <GitBranch className="w-5 h-5" />,       label: "Reassign Leads",  roles: ["Manager"] },
+  { href: "/final-approvals",icon: <ShieldCheck className="w-5 h-5" />,     label: "Final Approvals", roles: ["Manager"] },
+];
+
+
+export function Layout({ children }: { children: ReactNode }) {
+  const { user, logout } = useAuth();
+  const [location] = useLocation();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">(
+    (localStorage.getItem("theme") as "light" | "dark") || "light"
+  );
+
+
+  useEffect(() => {
+    document.documentElement.classList.remove("light", "dark");
+    document.documentElement.classList.add(theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+
+  const visibleNav = navItems.filter(n => user?.role && n.roles.includes(user.role));
+
+
+  return (
+    <div className="min-h-screen bg-background flex">
+
+
+      {/* Overlay for mobile */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 z-30 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+
+      {/* Sidebar */}
+      <aside className={clsx(
+        "fixed top-0 left-0 h-full w-64 bg-card border-r border-border/50 flex flex-col z-40 shadow-lg",
+        "transition-transform duration-300 ease-in-out",
+        sidebarOpen ? "translate-x-0" : "-translate-x-full",
+        "md:relative md:translate-x-0 md:shadow-none md:flex"
+      )}>
+        {/* Logo */}
+        <div className="p-5 flex items-center justify-between border-b border-border/30">
+          <div className="flex items-center gap-2">
+            <div className="bg-white rounded-lg p-1 shadow-sm">
+              <img
+                src="https://www.highspring.com/wp-content/uploads/sites/2/2025/01/HS-black-logo.svg"
+                alt="HighSpring"
+                className="h-7 w-auto"
+              />
+            </div>
+            <span className="font-bold text-base text-foreground">Performance</span>
+          </div>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="md:hidden text-muted-foreground hover:text-foreground"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+
+        {/* Nav */}
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+          {visibleNav.map(item => (
+            <Link key={item.href} href={item.href} onClick={() => setSidebarOpen(false)}>
+              <span className={clsx(
+                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all duration-150 cursor-pointer",
+                location === item.href
+                  ? "bg-primary/10 text-primary"
+                  : "text-muted-foreground hover:bg-secondary hover:text-foreground"
+              )}>
+                {item.icon}
+                {item.label}
+              </span>
+            </Link>
+          ))}
+        </nav>
+
+
+        {/* User footer */}
+        <div className="p-4 border-t border-border/30 bg-secondary/20 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold text-sm shrink-0">
+                {user?.displayName.charAt(0)}
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold truncate">{user?.displayName}</p>
+                <p className="text-xs text-muted-foreground">{user?.role} · {user?.level}</p>
+              </div>
+            </div>
+            <Button variant="ghost" size="icon" onClick={() => setTheme(theme === "light" ? "dark" : "light")} className="shrink-0 rounded-full">
+              {theme === "light" ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
+            </Button>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full justify-start text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
+            onClick={logout}
+          >
+            <LogOut className="w-4 h-4 mr-2" /> Sign Out
+          </Button>
+        </div>
+      </aside>
+
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Topbar (mobile) */}
+        <header className="md:hidden flex items-center gap-3 px-4 py-3 bg-card border-b border-border/30 sticky top-0 z-20">
+          <button onClick={() => setSidebarOpen(true)} className="text-muted-foreground hover:text-foreground">
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="bg-white rounded px-1 py-0.5">
+            <img
+              src="https://www.highspring.com/wp-content/uploads/sites/2/2025/01/HS-black-logo.svg"
+              alt="HighSpring"
+              className="h-5 w-auto"
+            />
+          </div>
+          <span className="font-semibold text-sm">Performance</span>
+        </header>
+
+
+        <main className="flex-1 overflow-x-hidden overflow-y-auto">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/pages/manage-team.tsx
+import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth";
+import { Layout } from "@/components/layout";
+import { useListUsers, useUpdateUser, useRegisterUser, useGetRatingCycle, useSetRatingCycle, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { Settings, UserMinus, CalendarClock, Plus, Pencil, Mail, ShieldCheck, Bell } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+
+interface UserForm {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  level: string;
+  ldap: string;
+  process: string;
+  vacoEmployeeCode: string;
+  joiningDate: string;
+}
+
+
+const emptyForm: UserForm = {
+  displayName: "",
+  username: "",
+  email: "",
+  password: "",
+  level: "L1",
+  ldap: "",
+  process: "",
+  vacoEmployeeCode: "",
+  joiningDate: "",
+};
+
+
+const LEVELS = ["L1", "L2", "L3"];
+
+
+export default function ManageTeam() {
+  const { user, token, isLoading } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+
+  // Remove dialog
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+
+  // Add User dialog
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addForm, setAddForm] = useState<UserForm>(emptyForm);
+
+
+  // Edit User dialog
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<UserForm>(emptyForm);
+
+
+  // Reminder dialog
+  const [reminderOpen, setReminderOpen] = useState(false);
+  const [reminderDeadline, setReminderDeadline] = useState("");
+  const [reminderMsg, setReminderMsg] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectAll, setSelectAll] = useState(true);
+
+
+  useEffect(() => {
+    if (!isLoading && !token) setLocation("/login");
+    if (!isLoading && user && user.role === "User") setLocation("/dashboard");
+  }, [isLoading, token, user, setLocation]);
+
+
+  const { data: members, isLoading: loadingMembers } = useListUsers(
+    user?.teamId ? { teamId: user.teamId } : undefined,
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: updateUser, isPending } = useUpdateUser();
+  const { mutate: registerUser, isPending: isRegistering } = useRegisterUser();
+  const { mutate: sendReminder, isPending: isSending } = useSendReminder();
+
+
+  const currentYear = new Date().getFullYear();
+  const [cycleQ, setCycleQ] = useState<RatingQuarter>(RatingQuarter.Q1);
+  const [cycleY, setCycleY] = useState<number>(currentYear);
+
+
+  const { data: cycleData, isLoading: loadingCycle } = useGetRatingCycle(
+    { teamId: user?.teamId!, quarter: cycleQ, year: cycleY },
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: setCycle, isPending: isSettingCycle } = useSetRatingCycle();
+
+
+  const handleToggleCycle = (checked: boolean) => {
+    if (!user?.teamId) return;
+    setCycle({ data: { teamId: user.teamId, quarter: cycleQ, year: cycleY, isOpen: checked } }, {
+      onSuccess: () => {
+        toast({ title: `Quarter submissions ${checked ? "opened" : "closed"}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/rating-cycles"] });
+      },
+      onError: () => toast({ title: "Failed to update cycle status", variant: "destructive" })
+    });
+  };
+
+
+  const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+
+
+  // --- Reminder ---
+  const openReminderModal = () => {
+    const ids = teamMembers.map(m => m.userId);
+    setSelectedUserIds(ids);
+    setSelectAll(true);
+    setReminderDeadline("");
+    setReminderMsg("");
+    setReminderOpen(true);
+  };
+
+
+  const handleToggleSelectAll = (checked: boolean) => {
+    setSelectAll(checked);
+    setSelectedUserIds(checked ? teamMembers.map(m => m.userId) : []);
+  };
+
+
+  const handleToggleMember = (userId: string, checked: boolean) => {
+    setSelectedUserIds(prev =>
+      checked ? [...prev, userId] : prev.filter(id => id !== userId)
+    );
+    setSelectAll(false);
+  };
+
+
+  const handleSendReminder = () => {
+    if (!user?.teamId || selectedUserIds.length === 0) return;
+    sendReminder({
+      data: {
+        teamId: user.teamId,
+        userIds: selectedUserIds,
+        deadline: reminderDeadline || undefined,
+        customMessage: reminderMsg || undefined,
+      }
+    }, {
+      onSuccess: (data) => {
+        toast({ title: (data as any).message ?? "Reminders sent" });
+        setReminderOpen(false);
+      },
+      onError: () => toast({ title: "Failed to send reminders", variant: "destructive" })
+    });
+  };
+
+
+  // --- Remove ---
+  const handleRemove = () => {
+    if (!removingId) return;
+    updateUser({ userId: removingId, data: { teamId: null } }, {
+      onSuccess: () => {
+        toast({ title: "Member removed from team" });
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+        setRemovingId(null);
+      },
+      onError: () => toast({ title: "Failed to remove member", variant: "destructive" })
+    });
+  };
+
+
+  // --- Add User ---
+  const setAdd = (field: keyof UserForm, value: string) =>
+    setAddForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleCreate = () => {
+    if (!addForm.displayName || !addForm.username || !addForm.email || !addForm.password) {
+      toast({ title: "Full Name, Username, Email, and Password are required", variant: "destructive" });
+      return;
+    }
+    registerUser({
+      data: {
+        displayName: addForm.displayName.trim(),
+        username: addForm.username.trim(),
+        email: addForm.email.trim(),
+        password: addForm.password,
+        role: "User",
+        level: addForm.level,
+        teamId: user?.teamId ?? null,
+        ldap: addForm.ldap.trim() || null,
+        process: addForm.process.trim() || null,
+        vacoEmployeeCode: addForm.vacoEmployeeCode.trim() || null,
+        joiningDate: addForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: (newUser) => {
+        toast({ title: `${newUser.displayName} added to your team` });
+        setAddDialogOpen(false);
+        setAddForm(emptyForm);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to create user",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  // --- Edit User ---
+  const openEdit = (m: typeof teamMembers[0]) => {
+    setEditingId(m.userId);
+    setEditForm({
+      displayName: m.displayName,
+      username: m.username,
+      email: m.email,
+      password: "",
+      level: m.level,
+      ldap: (m as any).ldap ?? "",
+      process: (m as any).process ?? "",
+      vacoEmployeeCode: (m as any).vacoEmployeeCode ?? "",
+      joiningDate: (m as any).joiningDate ?? "",
+    });
+    setEditDialogOpen(true);
+  };
+
+
+  const setEdit = (field: keyof UserForm, value: string) =>
+    setEditForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleUpdate = () => {
+    if (!editingId) return;
+    if (!editForm.displayName || !editForm.username || !editForm.email) {
+      toast({ title: "Full Name, Username, and Email are required", variant: "destructive" });
+      return;
+    }
+    updateUser({
+      userId: editingId,
+      data: {
+        displayName: editForm.displayName.trim(),
+        username: editForm.username.trim(),
+        email: editForm.email.trim(),
+        level: editForm.level,
+        ldap: editForm.ldap.trim() || null,
+        process: editForm.process.trim() || null,
+        vacoEmployeeCode: editForm.vacoEmployeeCode.trim() || null,
+        joiningDate: editForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: () => {
+        toast({ title: "Member updated successfully" });
+        setEditDialogOpen(false);
+        setEditingId(null);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to update member",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
+
+
+  const memberToRemove = members?.find(m => m.userId === removingId);
+
+
+  return (
+    <Layout>
+      <div className="p-6 max-w-3xl mx-auto space-y-6">
+        {/* Header Card with Add User button */}
+        <div className="bg-card p-5 rounded-2xl border border-border/50 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+                <Settings className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold">Manage Team</h1>
+                <p className="text-muted-foreground text-sm">{user.teamName || "Your team"} · {teamMembers.length} member(s)</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="outline"
+                onClick={openReminderModal}
+                id="send-reminder-btn"
+              >
+                <Bell className="w-4 h-4 mr-1.5" /> Send Reminder
+              </Button>
+              <Button
+                onClick={() => { setAddForm(emptyForm); setAddDialogOpen(true); }}
+                id="add-user-btn"
+              >
+                <Plus className="w-4 h-4 mr-1.5" /> Add User
+              </Button>
+            </div>
+          </div>
+        </div>
+
+
+        {/* Submission Cycle Management */}
+        <Card className="p-5 border-border/50 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <CalendarClock className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold">Submission Cycle Management</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Toggle the status to Open or Close the submission window for a specific quarter. When closed, members cannot submit or edit ratings for that quarter.
+          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-secondary/20 rounded-xl border">
+            <div className="flex items-center gap-3">
+              <Select value={cycleQ} onValueChange={(v) => setCycleQ(v as RatingQuarter)}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(["Q1","Q2","Q3","Q4"] as const).map(q => <SelectItem key={q} value={q}>{q}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={cycleY.toString()} onValueChange={(v) => setCycleY(parseInt(v))}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[currentYear - 1, currentYear, currentYear + 1, currentYear + 2].map(y => (
+                    <SelectItem key={y} value={y.toString()}>{y}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="cycle-toggle" className="text-sm font-medium">
+                {loadingCycle ? "Loading..." : cycleData?.isOpen ? (
+                  <span className="text-emerald-600 dark:text-emerald-400">Open</span>
+                ) : (
+                  <span className="text-muted-foreground">Closed</span>
+                )}
+              </Label>
+              <Switch
+                id="cycle-toggle"
+                checked={!!cycleData?.isOpen}
+                onCheckedChange={handleToggleCycle}
+                disabled={loadingCycle || isSettingCycle}
+              />
+            </div>
+          </div>
+        </Card>
+
+
+        {/* Team Members */}
+        {loadingMembers ? (
+          <div className="text-center py-12 text-muted-foreground">Loading...</div>
+        ) : teamMembers.length === 0 ? (
+          <Card className="p-12 text-center border-dashed">
+            <Settings className="w-12 h-12 mx-auto text-muted-foreground/40 mb-3" />
+            <p className="text-muted-foreground">No team members yet. Add the first one using the button above.</p>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {teamMembers.map(m => (
+              <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
+                    {m.displayName.charAt(0)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-semibold truncate">{m.displayName}</p>
+                    <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
+                    {(m as any).ldap && (
+                      <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-primary border-primary/20 hover:bg-primary/10"
+                    onClick={() => openEdit(m)}
+                    id={`edit-user-${m.userId}`}
+                  >
+                    <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                    onClick={() => setRemovingId(m.userId)}
+                    id={`remove-user-${m.userId}`}
+                  >
+                    <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+
+      {/* Remove Confirmation Dialog */}
+      <AlertDialog open={!!removingId} onOpenChange={(o) => !o && setRemovingId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Team Member</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove <strong>{memberToRemove?.displayName}</strong> from your team? They will no longer be assigned to a team.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRemove} disabled={isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+
+      {/* Add User Dialog */}
+      <Dialog open={addDialogOpen} onOpenChange={v => { if (!v) { setAddDialogOpen(false); setAddForm(emptyForm); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="w-5 h-5" /> Add New User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="a-displayName" placeholder="e.g. Jane Doe" value={addForm.displayName} onChange={e => setAdd("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="a-username" placeholder="e.g. jane.doe" value={addForm.username} onChange={e => setAdd("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-email" type="email" placeholder="jane@example.com" value={addForm.email} onChange={e => setAdd("email", e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-password" className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> Password <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-password" type="password" placeholder="Minimum 6 characters" value={addForm.password} onChange={e => setAdd("password", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={addForm.level} onValueChange={v => setAdd("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-ldap">LDAP</Label>
+                <Input id="a-ldap" placeholder="e.g. jane.doe@corp" value={addForm.ldap} onChange={e => setAdd("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-process">Process</Label>
+                <Input id="a-process" placeholder="e.g. SCIM" value={addForm.process} onChange={e => setAdd("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-vaco">Vaco Employee Code</Label>
+                <Input id="a-vaco" placeholder="e.g. EMP-1234" value={addForm.vacoEmployeeCode} onChange={e => setAdd("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-joiningDate">Joining Date</Label>
+              <Input id="a-joiningDate" type="date" value={addForm.joiningDate} onChange={e => setAdd("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setAddDialogOpen(false); setAddForm(emptyForm); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={isRegistering}>
+              {isRegistering ? "Creating..." : "Create User"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Edit User Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={v => { if (!v) { setEditDialogOpen(false); setEditingId(null); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="w-5 h-5" /> Edit User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="e-displayName" placeholder="e.g. Jane Doe" value={editForm.displayName} onChange={e => setEdit("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="e-username" placeholder="e.g. jane.doe" value={editForm.username} onChange={e => setEdit("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="e-email" type="email" placeholder="jane@example.com" value={editForm.email} onChange={e => setEdit("email", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={editForm.level} onValueChange={v => setEdit("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-ldap">LDAP</Label>
+                <Input id="e-ldap" placeholder="e.g. jane.doe@corp" value={editForm.ldap} onChange={e => setEdit("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-process">Process</Label>
+                <Input id="e-process" placeholder="e.g. SCIM" value={editForm.process} onChange={e => setEdit("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-vaco">Vaco Employee Code</Label>
+                <Input id="e-vaco" placeholder="e.g. EMP-1234" value={editForm.vacoEmployeeCode} onChange={e => setEdit("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-joiningDate">Joining Date</Label>
+              <Input id="e-joiningDate" type="date" value={editForm.joiningDate} onChange={e => setEdit("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setEditDialogOpen(false); setEditingId(null); }}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={isPending}>
+              {isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Send Reminder Dialog */}
+      <Dialog open={reminderOpen} onOpenChange={(v) => { if (!v) setReminderOpen(false); }}>
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bell className="w-4 h-4" /> Send Rating Reminder
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-1">
+            {/* Recipients */}
+            <div className="space-y-2">
+              <Label className="text-sm font-semibold">Select Recipients</Label>
+              <div className="border rounded-lg overflow-hidden">
+                {/* Select All */}
+                <label className="flex items-center gap-3 px-3 py-2.5 bg-secondary/30 border-b cursor-pointer hover:bg-secondary/50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={selectAll && selectedUserIds.length === teamMembers.length}
+                    onChange={e => handleToggleSelectAll(e.target.checked)}
+                    className="w-4 h-4 rounded accent-primary"
+                  />
+                  <span className="text-sm font-medium">Select All ({teamMembers.length})</span>
+                </label>
+                {/* Member list */}
+                <div className="max-h-48 overflow-y-auto divide-y">
+                  {teamMembers.map(m => (
+                    <label
+                      key={m.userId}
+                      className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-secondary/20 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedUserIds.includes(m.userId)}
+                        onChange={e => handleToggleMember(m.userId, e.target.checked)}
+                        className="w-4 h-4 rounded accent-primary"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{m.displayName}</p>
+                        <p className="text-xs text-muted-foreground truncate">{m.email}</p>
+                      </div>
+                    </label>
+                  ))}
+                  {teamMembers.length === 0 && (
+                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">No team members found</p>
+                  )}
+                </div>
+              </div>
+              {selectedUserIds.length === 0 && (
+                <p className="text-xs text-destructive">Select at least one recipient to send reminders.</p>
+              )}
+            </div>
+            {/* Deadline */}
+            <div className="space-y-1.5">
+              <Label>Deadline Date (optional)</Label>
+              <Input type="date" value={reminderDeadline} onChange={e => setReminderDeadline(e.target.value)} />
+            </div>
+            {/* Message */}
+            <div className="space-y-1.5">
+              <Label>Custom Message (optional)</Label>
+              <Textarea
+                placeholder="Leave blank to use the default reminder message..."
+                value={reminderMsg}
+                onChange={e => setReminderMsg(e.target.value)}
+                className="resize-none h-24"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReminderOpen(false)}>Cancel</Button>
+            <Button
+              onClick={handleSendReminder}
+              disabled={isSending || selectedUserIds.length === 0}
+              id="confirm-send-reminder-btn"
+            >
+              {isSending ? "Sending..." : `Send to ${selectedUserIds.length} member(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Layout>
+  );
+}
+File Path: /home/chaudharyharshit/Employee-Performance-Hub/artifacts/performance-rating/src/pages/my-team.tsx
+import { useState, useEffect } from "react";
+import { useAuth } from "@/lib/auth";
+import { Layout } from "@/components/layout";
+import { useListUsers, useUpdateUser, useRegisterUser, useGetRatingCycle, useSetRatingCycle, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
+import { Card } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { useToast } from "@/hooks/use-toast";
+import { useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import { Settings, UserMinus, CalendarClock, Plus, Pencil, Mail, ShieldCheck, Bell } from "lucide-react";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+
+interface UserForm {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  level: string;
+  ldap: string;
+  process: string;
+  vacoEmployeeCode: string;
+  joiningDate: string;
+}
+
+
+const emptyForm: UserForm = {
+  displayName: "",
+  username: "",
+  email: "",
+  password: "",
+  level: "L1",
+  ldap: "",
+  process: "",
+  vacoEmployeeCode: "",
+  joiningDate: "",
+};
+
+
+const LEVELS = ["L1", "L2", "L3"];
+
+
+export default function ManageTeam() {
+  const { user, token, isLoading } = useAuth();
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+
+  // Remove dialog
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+
+  // Add User dialog
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [addForm, setAddForm] = useState<UserForm>(emptyForm);
+
+
+  // Edit User dialog
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<UserForm>(emptyForm);
+
+
+  // Reminder dialog
+  const [reminderOpen, setReminderOpen] = useState(false);
+  const [reminderDeadline, setReminderDeadline] = useState("");
+  const [reminderMsg, setReminderMsg] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
+  const [selectAll, setSelectAll] = useState(true);
+
+
+  useEffect(() => {
+    if (!isLoading && !token) setLocation("/login");
+    if (!isLoading && user && user.role === "User") setLocation("/dashboard");
+  }, [isLoading, token, user, setLocation]);
+
+
+  const { data: members, isLoading: loadingMembers } = useListUsers(
+    user?.teamId ? { teamId: user.teamId } : undefined,
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: updateUser, isPending } = useUpdateUser();
+  const { mutate: registerUser, isPending: isRegistering } = useRegisterUser();
+  const { mutate: sendReminder, isPending: isSending } = useSendReminder();
+
+
+  const currentYear = new Date().getFullYear();
+  const [cycleQ, setCycleQ] = useState<RatingQuarter>(RatingQuarter.Q1);
+  const [cycleY, setCycleY] = useState<number>(currentYear);
+
+
+  const { data: cycleData, isLoading: loadingCycle } = useGetRatingCycle(
+    { teamId: user?.teamId!, quarter: cycleQ, year: cycleY },
+    { query: { enabled: !!user?.teamId } as any }
+  );
+
+
+  const { mutate: setCycle, isPending: isSettingCycle } = useSetRatingCycle();
+
+
+  const handleToggleCycle = (checked: boolean) => {
+    if (!user?.teamId) return;
+    setCycle({ data: { teamId: user.teamId, quarter: cycleQ, year: cycleY, isOpen: checked } }, {
+      onSuccess: () => {
+        toast({ title: `Quarter submissions ${checked ? "opened" : "closed"}` });
+        queryClient.invalidateQueries({ queryKey: ["/api/rating-cycles"] });
+      },
+      onError: () => toast({ title: "Failed to update cycle status", variant: "destructive" })
+    });
+  };
+
+
+  const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+
+
+  // --- Reminder ---
+  const openReminderModal = () => {
+    const ids = teamMembers.map(m => m.userId);
+    setSelectedUserIds(ids);
+    setSelectAll(true);
+    setReminderDeadline("");
+    setReminderMsg("");
+    setReminderOpen(true);
+  };
+
+
+  const handleToggleSelectAll = (checked: boolean) => {
+    setSelectAll(checked);
+    setSelectedUserIds(checked ? teamMembers.map(m => m.userId) : []);
+  };
+
+
+  const handleToggleMember = (userId: string, checked: boolean) => {
+    setSelectedUserIds(prev =>
+      checked ? [...prev, userId] : prev.filter(id => id !== userId)
+    );
+    setSelectAll(false);
+  };
+
+
+  const handleSendReminder = () => {
+    if (!user?.teamId || selectedUserIds.length === 0) return;
+    sendReminder({
+      data: {
+        teamId: user.teamId,
+        userIds: selectedUserIds,
+        deadline: reminderDeadline || undefined,
+        customMessage: reminderMsg || undefined,
+      }
+    }, {
+      onSuccess: (data) => {
+        toast({ title: (data as any).message ?? "Reminders sent" });
+        setReminderOpen(false);
+      },
+      onError: () => toast({ title: "Failed to send reminders", variant: "destructive" })
+    });
+  };
+
+
+  // --- Remove ---
+  const handleRemove = () => {
+    if (!removingId) return;
+    updateUser({ userId: removingId, data: { teamId: null } }, {
+      onSuccess: () => {
+        toast({ title: "Member removed from team" });
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+        setRemovingId(null);
+      },
+      onError: () => toast({ title: "Failed to remove member", variant: "destructive" })
+    });
+  };
+
+
+  // --- Add User ---
+  const setAdd = (field: keyof UserForm, value: string) =>
+    setAddForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleCreate = () => {
+    if (!addForm.displayName || !addForm.username || !addForm.email || !addForm.password) {
+      toast({ title: "Full Name, Username, Email, and Password are required", variant: "destructive" });
+      return;
+    }
+    registerUser({
+      data: {
+        displayName: addForm.displayName.trim(),
+        username: addForm.username.trim(),
+        email: addForm.email.trim(),
+        password: addForm.password,
+        role: "User",
+        level: addForm.level,
+        teamId: user?.teamId ?? null,
+        ldap: addForm.ldap.trim() || null,
+        process: addForm.process.trim() || null,
+        vacoEmployeeCode: addForm.vacoEmployeeCode.trim() || null,
+        joiningDate: addForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: (newUser) => {
+        toast({ title: `${newUser.displayName} added to your team` });
+        setAddDialogOpen(false);
+        setAddForm(emptyForm);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to create user",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  // --- Edit User ---
+  const openEdit = (m: typeof teamMembers[0]) => {
+    setEditingId(m.userId);
+    setEditForm({
+      displayName: m.displayName,
+      username: m.username,
+      email: m.email,
+      password: "",
+      level: m.level,
+      ldap: (m as any).ldap ?? "",
+      process: (m as any).process ?? "",
+      vacoEmployeeCode: (m as any).vacoEmployeeCode ?? "",
+      joiningDate: (m as any).joiningDate ?? "",
+    });
+    setEditDialogOpen(true);
+  };
+
+
+  const setEdit = (field: keyof UserForm, value: string) =>
+    setEditForm(prev => ({ ...prev, [field]: value }));
+
+
+  const handleUpdate = () => {
+    if (!editingId) return;
+    if (!editForm.displayName || !editForm.username || !editForm.email) {
+      toast({ title: "Full Name, Username, and Email are required", variant: "destructive" });
+      return;
+    }
+    updateUser({
+      userId: editingId,
+      data: {
+        displayName: editForm.displayName.trim(),
+        username: editForm.username.trim(),
+        email: editForm.email.trim(),
+        level: editForm.level,
+        ldap: editForm.ldap.trim() || null,
+        process: editForm.process.trim() || null,
+        vacoEmployeeCode: editForm.vacoEmployeeCode.trim() || null,
+        joiningDate: editForm.joiningDate || null,
+      }
+    }, {
+      onSuccess: () => {
+        toast({ title: "Member updated successfully" });
+        setEditDialogOpen(false);
+        setEditingId(null);
+        queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      },
+      onError: (err: any) => toast({
+        title: "Failed to update member",
+        description: err?.message ?? "An error occurred",
+        variant: "destructive"
+      })
+    });
+  };
+
+
+  if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
+
+
+  const memberToRemove = members?.find(m => m.userId === removingId);
+
+
+  return (
+    <Layout>
+      <div className="p-6 max-w-3xl mx-auto space-y-6">
+        {/* Header Card with Add User button */}
+        <div className="bg-card p-5 rounded-2xl border border-border/50 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center">
+                <Settings className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold">Manage Team</h1>
+                <p className="text-muted-foreground text-sm">{user.teamName || "Your team"} · {teamMembers.length} member(s)</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="outline"
+                onClick={openReminderModal}
+                id="send-reminder-btn"
+              >
+                <Bell className="w-4 h-4 mr-1.5" /> Send Reminder
+              </Button>
+              <Button
+                onClick={() => { setAddForm(emptyForm); setAddDialogOpen(true); }}
+                id="add-user-btn"
+              >
+                <Plus className="w-4 h-4 mr-1.5" /> Add User
+              </Button>
+            </div>
+          </div>
+        </div>
+
+
+        {/* Submission Cycle Management */}
+        <Card className="p-5 border-border/50 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <CalendarClock className="w-5 h-5 text-primary" />
+            <h2 className="text-lg font-semibold">Submission Cycle Management</h2>
+          </div>
+          <p className="text-sm text-muted-foreground mb-4">
+            Toggle the status to Open or Close the submission window for a specific quarter. When closed, members cannot submit or edit ratings for that quarter.
+          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-secondary/20 rounded-xl border">
+            <div className="flex items-center gap-3">
+              <Select value={cycleQ} onValueChange={(v) => setCycleQ(v as RatingQuarter)}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(["Q1","Q2","Q3","Q4"] as const).map(q => <SelectItem key={q} value={q}>{q}</SelectItem>)}
+                </SelectContent>
+              </Select>
+              <Select value={cycleY.toString()} onValueChange={(v) => setCycleY(parseInt(v))}>
+                <SelectTrigger className="w-[100px] bg-background"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {[currentYear - 1, currentYear, currentYear + 1, currentYear + 2].map(y => (
+                    <SelectItem key={y} value={y.toString()}>{y}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="cycle-toggle" className="text-sm font-medium">
+                {loadingCycle ? "Loading..." : cycleData?.isOpen ? (
+                  <span className="text-emerald-600 dark:text-emerald-400">Open</span>
+                ) : (
+                  <span className="text-muted-foreground">Closed</span>
+                )}
+              </Label>
+              <Switch
+                id="cycle-toggle"
+                checked={!!cycleData?.isOpen}
+                onCheckedChange={handleToggleCycle}
+                disabled={loadingCycle || isSettingCycle}
+              />
+            </div>
+          </div>
+        </Card>
+
+
+        {/* Team Members */}
+        {loadingMembers ? (
+          <div className="text-center py-12 text-muted-foreground">Loading...</div>
+        ) : teamMembers.length === 0 ? (
+          <Card className="p-12 text-center border-dashed">
+            <Settings className="w-12 h-12 mx-auto text-muted-foreground/40 mb-3" />
+            <p className="text-muted-foreground">No team members yet. Add the first one using the button above.</p>
+          </Card>
+        ) : (
+          <div className="space-y-3">
+            {teamMembers.map(m => (
+              <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
+                    {m.displayName.charAt(0)}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-semibold truncate">{m.displayName}</p>
+                    <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
+                    {(m as any).ldap && (
+                      <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-primary border-primary/20 hover:bg-primary/10"
+                    onClick={() => openEdit(m)}
+                    id={`edit-user-${m.userId}`}
+                  >
+                    <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                    onClick={() => setRemovingId(m.userId)}
+                    id={`remove-user-${m.userId}`}
+                  >
+                    <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                  </Button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+
+      {/* Remove Confirmation Dialog */}
+      <AlertDialog open={!!removingId} onOpenChange={(o) => !o && setRemovingId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Team Member</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove <strong>{memberToRemove?.displayName}</strong> from your team? They will no longer be assigned to a team.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRemove} disabled={isPending} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+
+      {/* Add User Dialog */}
+      <Dialog open={addDialogOpen} onOpenChange={v => { if (!v) { setAddDialogOpen(false); setAddForm(emptyForm); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="w-5 h-5" /> Add New User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="a-displayName" placeholder="e.g. Jane Doe" value={addForm.displayName} onChange={e => setAdd("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="a-username" placeholder="e.g. jane.doe" value={addForm.username} onChange={e => setAdd("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-email" type="email" placeholder="jane@example.com" value={addForm.email} onChange={e => setAdd("email", e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-password" className="flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" /> Password <span className="text-destructive">*</span>
+              </Label>
+              <Input id="a-password" type="password" placeholder="Minimum 6 characters" value={addForm.password} onChange={e => setAdd("password", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={addForm.level} onValueChange={v => setAdd("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-ldap">LDAP</Label>
+                <Input id="a-ldap" placeholder="e.g. jane.doe@corp" value={addForm.ldap} onChange={e => setAdd("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="a-process">Process</Label>
+                <Input id="a-process" placeholder="e.g. SCIM" value={addForm.process} onChange={e => setAdd("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="a-vaco">Vaco Employee Code</Label>
+                <Input id="a-vaco" placeholder="e.g. EMP-1234" value={addForm.vacoEmployeeCode} onChange={e => setAdd("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="a-joiningDate">Joining Date</Label>
+              <Input id="a-joiningDate" type="date" value={addForm.joiningDate} onChange={e => setAdd("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setAddDialogOpen(false); setAddForm(emptyForm); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={isRegistering}>
+              {isRegistering ? "Creating..." : "Create User"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Edit User Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={v => { if (!v) { setEditDialogOpen(false); setEditingId(null); } }}>
+        <DialogContent className="sm:max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="w-5 h-5" /> Edit User
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-displayName">Full Name <span className="text-destructive">*</span></Label>
+                <Input id="e-displayName" placeholder="e.g. Jane Doe" value={editForm.displayName} onChange={e => setEdit("displayName", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-username">Username <span className="text-destructive">*</span></Label>
+                <Input id="e-username" placeholder="e.g. jane.doe" value={editForm.username} onChange={e => setEdit("username", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-email" className="flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5" /> Email <span className="text-destructive">*</span>
+              </Label>
+              <Input id="e-email" type="email" placeholder="jane@example.com" value={editForm.email} onChange={e => setEdit("email", e.target.value)} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label>Level</Label>
+                <Select value={editForm.level} onValueChange={v => setEdit("level", v)}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LEVELS.map(l => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-ldap">LDAP</Label>
+                <Input id="e-ldap" placeholder="e.g. jane.doe@corp" value={editForm.ldap} onChange={e => setEdit("ldap", e.target.value)} />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="e-process">Process</Label>
+                <Input id="e-process" placeholder="e.g. SCIM" value={editForm.process} onChange={e => setEdit("process", e.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="e-vaco">Vaco Employee Code</Label>
+                <Input id="e-vaco" placeholder="e.g. EMP-1234" value={editForm.vacoEmployeeCode} onChange={e => setEdit("vacoEmployeeCode", e.target.value)} />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="e-joiningDate">Joining Date</Label>
+              <Input id="e-joiningDate" type="date" value={editForm.joiningDate} onChange={e => setEdit("joiningDate", e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => { setEditDialogOpen(false); setEditingId(null); }}>Cancel</Button>
+            <Button onClick={handleUpdate} disabled={isPending}>
+              {isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+
+      {/* Send Reminder Dialog */}
+      <Dialog open={reminderOpen} onOpenChange={(v) => { if (!v) setReminderOpen(false); }}>
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bell className="w-4 h-4" /> Send Rating Reminder
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-1">
+            {/* Recipients */}
+            <div className="space-y-2">
+              <Label className="text-sm font-semibold">Select Recipients</Label>
+              <div className="border rounded-lg overflow-hidden">
+                {/* Select All */}
+                <label className="flex items-center gap-3 px-3 py-2.5 bg-secondary/30 border-b cursor-pointer hover:bg-secondary/50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={selectAll && selectedUserIds.length === teamMembers.length}
+                    onChange={e => handleToggleSelectAll(e.target.checked)}
+                    className="w-4 h-4 rounded accent-primary"
+                  />
+                  <span className="text-sm font-medium">Select All ({teamMembers.length})</span>
+                </label>
+                {/* Member list */}
+                <div className="max-h-48 overflow-y-auto divide-y">
+                  {teamMembers.map(m => (
+                    <label
+                      key={m.userId}
+                      className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-secondary/20 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedUserIds.includes(m.userId)}
+                        onChange={e => handleToggleMember(m.userId, e.target.checked)}
+                        className="w-4 h-4 rounded accent-primary"
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium truncate">{m.displayName}</p>
+                        <p className="text-xs text-muted-foreground truncate">{m.email}</p>
+                      </div>
+                    </label>
+                  ))}
+                  {teamMembers.length === 0 && (
+                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">No team members found</p>
+                  )}
+                </div>
+              </div>
+              {selectedUserIds.length === 0 && (
+                <p className="text-xs text-destructive">Select at least one recipient to send reminders.</p>
+              )}
+            </div>
+            {/* Deadline */}
+            <div className="space-y-1.5">
+              <Label>Deadline Date (optional)</Label>
+              <Input type="date" value={reminderDeadline} onChange={e => setReminderDeadline(e.target.value)} />
+            </div>
+            {/* Message */}
+            <div className="space-y-1.5">
+              <Label>Custom Message (optional)</Label>
+              <Textarea
+                placeholder="Leave blank to use the default reminder message..."
+                value={reminderMsg}
+                onChange={e => setReminderMsg(e.target.value)}
+                className="resize-none h-24"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReminderOpen(false)}>Cancel</Button>
+            <Button
+              onClick={handleSendReminder}
+              disabled={isSending || selectedUserIds.length === 0}
+              id="confirm-send-reminder-btn"
+            >
+              {isSending ? "Sending..." : `Send to ${selectedUserIds.length} member(s)`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Layout>
+  );
+}
+File Path: /home/chaudharyharshit/Employee-Performance-Hub/lib/api-client-react/src/generated/api.schemas.ts
+/**
+ * Generated by orval v8.5.3 🍺
+ * Do not edit manually.
+ * Api
+ * Employee Performance Rating API
+ * OpenAPI spec version: 0.1.0
+ */
+export interface HealthStatus {
+  status: string;
+}
+
+
+export interface ErrorResponse {
+  error: string;
+  message?: string;
+}
+
+
+export interface MessageResponse {
+  message: string;
+}
+
+
+export interface LoginRequest {
+  username: string;
+  password: string;
+}
+
+
+export type UserProfileRole =
+  (typeof UserProfileRole)[keyof typeof UserProfileRole];
+
+
+export const UserProfileRole = {
+  User: "User",
+  Team_Lead: "Team Lead",
+  Manager: "Manager",
+} as const;
+
+
+export type UserProfileLevel =
+  (typeof UserProfileLevel)[keyof typeof UserProfileLevel];
+
+
+export const UserProfileLevel = {
+  L1: "L1",
+  L2: "L2",
+  L3: "L3",
+} as const;
+
+
+export interface UserProfile {
+  userId: string;
+  displayName: string;
+  username: string;
+  email: string;
+  role: UserProfileRole;
+  level: UserProfileLevel;
+  teamId?: number | null;
+  teamName?: string | null;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface LoginResponse {
+  token: string;
+  user: UserProfile;
+}
+
+
+export interface UpdateUserRequest {
+  teamId?: number | null;
+  role?: string;
+  displayName?: string;
+  username?: string;
+  email?: string;
+  level?: string;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface Team {
+  teamId: number;
+  teamName: string;
+  tlUserId?: string | null;
+  managerUserId?: string | null;
+  tlDisplayName?: string | null;
+  managerDisplayName?: string | null;
+}
+
+
+export interface UpdateTeamRequest {
+  teamName?: string;
+  tlUserId?: string | null;
+  managerUserId?: string | null;
+}
+
+
+export interface RegisterUserRequest {
+  displayName: string;
+  username: string;
+  email: string;
+  password: string;
+  role?: string;
+  level?: string;
+  teamId?: number | null;
+  ldap?: string | null;
+  process?: string | null;
+  vacoEmployeeCode?: string | null;
+  joiningDate?: string | null;
+}
+
+
+export interface RatingItem {
+  itemId: number;
+  itemName: string;
+  description?: string | null;
+  teamId: number;
+  weight: number;
+  category?: string | null;
+  targetRole?: string | null;
+}
+
+
+export interface CreateItemRequest {
+  /** @maxLength 50 */
+  itemName: string;
+  /** @maxLength 200 */
+  description?: string;
+  teamId: number;
+  weight: number;
+  category?: string;
+  targetRole?: string;
+}
+
+
+export interface UpdateItemRequest {
+  /** @maxLength 50 */
+  itemName?: string;
+  /** @maxLength 200 */
+  description?: string;
+  weight?: number;
+  category?: string;
+  targetRole?: string;
+}
+
+
+export type RatingQuarter = (typeof RatingQuarter)[keyof typeof RatingQuarter];
+
+
+export const RatingQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface Rating {
+  ratingId: number;
+  itemId: number;
+  itemName?: string | null;
+  projectName?: string | null;
+  userId: string;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue: number;
+  comment?: string | null;
+  quarter: RatingQuarter;
+  year: number;
+  artifactLinks?: string | null;
+  createdOn: string;
+  category?: string | null;
+}
+
+
+export type SubmitRatingRequestQuarter =
+  (typeof SubmitRatingRequestQuarter)[keyof typeof SubmitRatingRequestQuarter];
+
+
+export const SubmitRatingRequestQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface SubmitRatingRequest {
+  itemId: number;
+  projectName?: string | null;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue: number;
+  comment?: string;
+  quarter: SubmitRatingRequestQuarter;
+  year: number;
+  artifactLinks?: string;
+}
+
+
+export interface UpdateRatingRequest {
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  ratingValue?: number;
+  comment?: string;
+  artifactLinks?: string;
+}
+
+
+export interface CategoryScore {
+  category: string;
+  weight: number;
+  avgRating: number;
+  weightedContribution: number;
+}
+
+
+export interface RatingSummary {
+  userId: string;
+  displayName: string;
+  quarter: string;
+  year: number;
+  weightedScore: number;
+  performanceLabel: string;
+  categoryScores: CategoryScore[];
+}
+
+
+export type ApprovalTlLgtmStatus =
+  (typeof ApprovalTlLgtmStatus)[keyof typeof ApprovalTlLgtmStatus];
+
+
+export const ApprovalTlLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export type ApprovalFinalLgtmStatus =
+  (typeof ApprovalFinalLgtmStatus)[keyof typeof ApprovalFinalLgtmStatus];
+
+
+export const ApprovalFinalLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface Approval {
+  approvalId: number;
+  ratingId?: number;
+  itemId: number;
+  itemName?: string | null;
+  projectName?: string | null;
+  teamId: number;
+  ratedUserId: string;
+  ratedUserName?: string | null;
+  selfRatingValue?: number | null;
+  tlRatingValue?: number | null;
+  tlLgtmStatus: ApprovalTlLgtmStatus;
+  tlLgtmTimestamp?: string | null;
+  tlLgtmByUserId?: string | null;
+  finalLgtmStatus: ApprovalFinalLgtmStatus;
+  finalLgtmTimestamp?: string | null;
+  finalLgtmByUserId?: string | null;
+  disputeStatus: boolean;
+  disputeComment?: string | null;
+  quarter?: string | null;
+  year?: number | null;
+  category?: string | null;
+}
+
+
+export type CreateApprovalRequestQuarter =
+  (typeof CreateApprovalRequestQuarter)[keyof typeof CreateApprovalRequestQuarter];
+
+
+export const CreateApprovalRequestQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export interface CreateApprovalRequest {
+  itemId: number;
+  ratingId: number;
+  teamId: number;
+  ratedUserId: string;
+  /**
+   * @minimum 0.1
+   * @maximum 5
+   */
+  tlRatingValue: number;
+  quarter: CreateApprovalRequestQuarter;
+  year: number;
+}
+
+
+export type UpdateApprovalRequestFinalLgtmStatus =
+  (typeof UpdateApprovalRequestFinalLgtmStatus)[keyof typeof UpdateApprovalRequestFinalLgtmStatus];
+
+
+export const UpdateApprovalRequestFinalLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export type UpdateApprovalRequestTlLgtmStatus =
+  (typeof UpdateApprovalRequestTlLgtmStatus)[keyof typeof UpdateApprovalRequestTlLgtmStatus];
+
+
+export const UpdateApprovalRequestTlLgtmStatus = {
+  Pending: "Pending",
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface UpdateApprovalRequest {
+  finalLgtmStatus?: UpdateApprovalRequestFinalLgtmStatus;
+  tlLgtmStatus?: UpdateApprovalRequestTlLgtmStatus;
+}
+
+
+export interface DisputeRequest {
+  disputeComment: string;
+}
+
+
+export type ResolveDisputeRequestResolution =
+  (typeof ResolveDisputeRequestResolution)[keyof typeof ResolveDisputeRequestResolution];
+
+
+export const ResolveDisputeRequestResolution = {
+  Approved: "Approved",
+  Rejected: "Rejected",
+} as const;
+
+
+export interface ResolveDisputeRequest {
+  resolution: ResolveDisputeRequestResolution;
+  comment?: string;
+}
+
+
+export interface SendReminderRequest {
+  teamId?: number;
+  /** If provided, sends reminder to this specific user only */
+  userId?: string;
+  /** If provided, sends reminders only to these specific users */
+  userIds?: string[];
+  deadline?: string;
+  customMessage?: string;
+}
+
+
+export interface RatingCycle {
+  teamId: number;
+  quarter: string;
+  year: number;
+  isOpen: boolean;
+}
+
+
+export interface UpdateRatingCycleRequest {
+  teamId: number;
+  quarter: string;
+  year: number;
+  isOpen: boolean;
+}
+
+
+export type ListUsersParams = {
+  teamId?: number;
+};
+
+
+export type ListItemsParams = {
+  teamId?: number;
+  targetRole?: string;
+};
+
+
+export type ListRatingsParams = {
+  userId?: string;
+  quarter?: ListRatingsQuarter;
+  fromQuarter?: ListRatingsFromQuarter;
+  toQuarter?: ListRatingsToQuarter;
+  year?: number;
+};
+
+
+export type ListRatingsQuarter =
+  (typeof ListRatingsQuarter)[keyof typeof ListRatingsQuarter];
+
+
+export const ListRatingsQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListRatingsFromQuarter =
+  (typeof ListRatingsFromQuarter)[keyof typeof ListRatingsFromQuarter];
+
+
+export const ListRatingsFromQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListRatingsToQuarter =
+  (typeof ListRatingsToQuarter)[keyof typeof ListRatingsToQuarter];
+
+
+export const ListRatingsToQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryParams = {
+  userId: string;
+  quarter?: GetRatingsSummaryQuarter;
+  fromQuarter?: GetRatingsSummaryFromQuarter;
+  toQuarter?: GetRatingsSummaryToQuarter;
+  year?: number;
+};
+
+
+export type GetRatingsSummaryQuarter =
+  (typeof GetRatingsSummaryQuarter)[keyof typeof GetRatingsSummaryQuarter];
+
+
+export const GetRatingsSummaryQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryFromQuarter =
+  (typeof GetRatingsSummaryFromQuarter)[keyof typeof GetRatingsSummaryFromQuarter];
+
+
+export const GetRatingsSummaryFromQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type GetRatingsSummaryToQuarter =
+  (typeof GetRatingsSummaryToQuarter)[keyof typeof GetRatingsSummaryToQuarter];
+
+
+export const GetRatingsSummaryToQuarter = {
+  Q1: "Q1",
+  Q2: "Q2",
+  Q3: "Q3",
+  Q4: "Q4",
+} as const;
+
+
+export type ListApprovalsParams = {
+  ratedUserId?: string;
+  teamId?: number;
+  quarter?: string;
+  year?: number;
+};
+
+
+export type ListDisputesParams = {
+  teamId?: number;
+};
+
+
+export type GetRatingCycleParams = {
+  teamId: number;
+  quarter: string;
+  year: number;
+};
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/api-server/src/routes/reminder.ts
+import { Router } from "express";
+import { db } from "@workspace/db";
+import { usersTable, teamsTable } from "@workspace/db/schema";
+import { eq, inArray } from "drizzle-orm";
+import { authenticate, AuthRequest, requireRole } from "../middlewares/authenticate.js";
+
+
+const router = Router();
+
+
+function printEmail(to: string, subject: string, body: string) {
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`[EMAIL REMINDER]`);
+  console.log(`To:      ${to}`);
+  console.log(`Subject: ${subject}`);
+  console.log(`Body:\n${body}`);
+  console.log(`${"=".repeat(60)}\n`);
+}
+
+
+router.post("/", authenticate, requireRole("Team Lead", "Manager"), async (req: AuthRequest, res) => {
+  try {
+    const { teamId, deadline, customMessage, userId, userIds } = req.body;
+    const currentUser = req.user!;
+    const deadlineText = deadline ? `Please complete your ratings before: ${deadline}.` : "";
+
+
+    // --- Selective: send to specific list of userIds ---
+    if (Array.isArray(userIds) && userIds.length > 0) {
+      const targetTeamId = teamId || currentUser.teamId;
+      if (!targetTeamId) {
+        res.status(400).json({ error: "teamId is required when using userIds" });
+        return;
+      }
+
+
+      // Fetch only the requested users that actually belong to the caller's team
+      const candidates = await db
+        .select()
+        .from(usersTable)
+        .where(eq(usersTable.teamId, targetTeamId));
+
+
+      const allowedIds = new Set(candidates.map(u => u.userId));
+      const validIds = (userIds as string[]).filter(id => allowedIds.has(id));
+
+
+      if (validIds.length === 0) {
+        res.status(400).json({ error: "None of the provided userIds belong to your team" });
+        return;
+      }
+
+
+      const targets = candidates.filter(u => validIds.includes(u.userId) && u.role === "User");
+      for (const member of targets) {
+        const emailBody = customMessage
+          ? `Dear ${member.displayName},\n\n${customMessage}\n\n${deadlineText}\n\nRegards,\n${currentUser.displayName}`
+          : `Dear ${member.displayName},\n\nYour performance ratings for this quarter are pending.\n${deadlineText}\n\nPlease log in and complete your self-ratings at your earliest convenience.\n\nSent by: ${currentUser.displayName}`;
+        printEmail(member.email, "Action Required: Performance Ratings Pending", emailBody);
+      }
+
+
+      res.json({ message: `Reminder sent to ${targets.length} member(s)` });
+      return;
+    }
+
+
+    // --- Single user: userId provided ---
+    if (userId) {
+      const [member] = await db.select().from(usersTable).where(eq(usersTable.userId, userId));
+      if (!member) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      // Security: ensure user belongs to the caller's team
+      if (member.teamId !== currentUser.teamId && currentUser.role !== "Manager") {
+        res.status(403).json({ error: "You can only send reminders to members of your team" });
+        return;
+      }
+
+
+      const emailBody = customMessage
+        ? `Dear ${member.displayName},\n\n${customMessage}\n\n${deadlineText}\n\nRegards,\n${currentUser.displayName}`
+        : `Dear ${member.displayName},\n\nYour performance ratings for this quarter are pending.\n${deadlineText}\n\nPlease log in and complete your self-ratings at your earliest convenience.\n\nSent by: ${currentUser.displayName}`;
+
+
+      printEmail(member.email, "Reminder: Your Performance Ratings Are Pending", emailBody);
+      res.json({ message: `Reminder sent to ${member.displayName}` });
+      return;
+    }
+
+
+    // --- Team-wide: fallback ---
+    const targetTeamId = teamId || currentUser.teamId;
+    if (!targetTeamId) {
+      res.status(400).json({ error: "teamId or userId or userIds is required" });
+      return;
+    }
+
+
+    const [team] = await db.select().from(teamsTable).where(eq(teamsTable.teamId, targetTeamId));
+    const members = await db.select().from(usersTable).where(eq(usersTable.teamId, targetTeamId));
+    const userMembers = members.filter(m => m.role === "User");
+
+
+    for (const member of userMembers) {
+      const defaultBody = `Dear ${member.displayName},\n\nYour performance ratings for this quarter are now live in the Employee Performance Portal.\n${deadlineText}\n\nPlease log in and fill out your self-ratings as soon as possible.\n\nTeam: ${team?.teamName || "Your Team"}\nSent by: ${currentUser.displayName}`;
+      const emailBody = customMessage
+        ? `Dear ${member.displayName},\n\n${customMessage}\n\n${deadlineText}\n\nRegards,\n${currentUser.displayName}`
+        : defaultBody;
+      printEmail(member.email, "Action Required: Performance Ratings Are Now Live!", emailBody);
+    }
+
+
+    res.json({ message: `Reminder sent to ${userMembers.length} team member(s)` });
+  } catch (err) {
+    req.log.error(err, "Send reminder error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+export default router;
+File Path: /home/chaudharyharshit/Employee-Performance-Hub/artifacts/api-server/src/lib/auth.ts
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+
+
+const JWT_SECRET = process.env.JWT_SECRET || "performance-rating-secret-key-2024";
+
+
+export interface JwtPayload {
+  userId: string;
+  displayName: string;
+  username: string;
+  role: string;
+  teamId: number | null;
+}
+
+
+export function signToken(payload: JwtPayload): string {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+}
+
+
+export function verifyToken(token: string): JwtPayload {
+  return jwt.verify(token, JWT_SECRET) as JwtPayload;
+}
+
+
+export async function hashPassword(password: string): Promise<string> {
+  return bcrypt.hash(password, 12);
+}
+
+
+export async function comparePassword(password: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(password, hash);
+}
+File Path:/home/chaudharyharshit/Employee-Performance-Hub/artifacts/api-server/src/routes/auth.ts
+import { Router } from "express";
+import { db } from "@workspace/db";
+import { usersTable, teamsTable } from "@workspace/db/schema";
+import { eq } from "drizzle-orm";
+import { signToken, comparePassword } from "../lib/auth.js";
+import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
+
+
+const router = Router();
+
+
+router.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    res.status(400).json({ error: "Bad Request", message: "Username and password required" });
+    return;
+  }
+
+
+  try {
+    const [user] = await db
+      .select()
+      .from(usersTable)
+      .where(eq(usersTable.username, username));
+
+
+    if (!user) {
+      res.status(401).json({ error: "Unauthorized", message: "Invalid credentials" });
+      return;
+    }
+
+
+    const valid = await comparePassword(password, user.password);
+    if (!valid) {
+      res.status(401).json({ error: "Unauthorized", message: "Invalid credentials" });
+      return;
+    }
+
+
+    let teamName: string | null = null;
+    if (user.teamId) {
+      const [team] = await db
+        .select()
+        .from(teamsTable)
+        .where(eq(teamsTable.teamId, user.teamId));
+      teamName = team?.teamName ?? null;
+    }
+
+
+    const token = signToken({
+      userId: user.userId,
+      displayName: user.displayName,
+      username: user.username,
+      role: user.role,
+      teamId: user.teamId,
+    });
+
+
+    res.json({
+      token,
+      user: {
+        userId: user.userId,
+        displayName: user.displayName,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        level: user.level,
+        teamId: user.teamId,
+        teamName,
+      },
+    });
+  } catch (err) {
+    req.log.error(err, "Login error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+router.get("/me", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const [user] = await db
+      .select()
+      .from(usersTable)
+      .where(eq(usersTable.userId, req.user!.userId));
+
+
+    if (!user) {
+      res.status(404).json({ error: "Not Found" });
+      return;
+    }
+
+
+    let teamName: string | null = null;
+    if (user.teamId) {
+      const [team] = await db
+        .select()
+        .from(teamsTable)
+        .where(eq(teamsTable.teamId, user.teamId));
+      teamName = team?.teamName ?? null;
+    }
+
+
+    res.json({
+      userId: user.userId,
+      displayName: user.displayName,
+      username: user.username,
+      email: user.email,
+      role: user.role,
+      level: user.level,
+      teamId: user.teamId,
+      teamName,
+    });
+  } catch (err) {
+    req.log.error(err, "Get me error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+
+export default router;

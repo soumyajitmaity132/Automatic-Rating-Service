@@ -1,0 +1,1052 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: Employee Performance Rating API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+  - name: auth
+  - name: users
+  - name: teams
+  - name: items
+  - name: ratings
+  - name: approvals
+  - name: disputes
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /auth/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+
+  /users:
+    get:
+      operationId: listUsers
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: teamId
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserProfile"
+
+  /users/{userId}:
+    get:
+      operationId: getUser
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+    patch:
+      operationId: updateUser
+      tags: [users]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserRequest"
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+
+  /teams:
+    get:
+      operationId: listTeams
+      tags: [teams]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: List of teams
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Team"
+
+  /teams/{teamId}:
+    get:
+      operationId: getTeam
+      tags: [teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Team details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+    patch:
+      operationId: updateTeam
+      tags: [teams]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTeamRequest"
+      responses:
+        "200":
+          description: Updated team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Team"
+
+  /users/register:
+    post:
+      operationId: registerUser
+      tags: [users]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterUserRequest"
+      responses:
+        "201":
+          description: User registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /items:
+    get:
+      operationId: listItems
+      tags: [items]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: teamId
+          in: query
+          schema:
+            type: integer
+        - name: targetRole
+          in: query
+          schema:
+            type: string
+        - name: level
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of rating items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RatingItem"
+    post:
+      operationId: createItem
+      tags: [items]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateItemRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingItem"
+
+  /items/{itemId}:
+    put:
+      operationId: updateItem
+      tags: [items]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateItemRequest"
+      responses:
+        "200":
+          description: Updated item
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingItem"
+    delete:
+      operationId: deleteItem
+      tags: [items]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  /ratings:
+    get:
+      operationId: listRatings
+      tags: [ratings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: userId
+          in: query
+          schema:
+            type: string
+        - name: quarter
+          in: query
+          schema:
+            type: string
+            enum: [Q1, Q2, Q3, Q4]
+        - name: year
+          in: query
+          schema:
+            type: integer
+        - name: includeDrafts
+          in: query
+          schema:
+            type: boolean
+      responses:
+        "200":
+          description: List of ratings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Rating"
+    post:
+      operationId: submitRating
+      tags: [ratings]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitRatingRequest"
+      responses:
+        "201":
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rating"
+
+  /ratings/{ratingId}:
+    put:
+      operationId: updateRating
+      tags: [ratings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ratingId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateRatingRequest"
+      responses:
+        "200":
+          description: Rating updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rating"
+    delete:
+      operationId: deleteRating
+      tags: [ratings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ratingId
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Rating deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+  /ratings/summary:
+    get:
+      operationId: getRatingsSummary
+      tags: [ratings]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: quarter
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [Q1, Q2, Q3, Q4]
+        - name: year
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Rating summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingSummary"
+
+  /approvals:
+    get:
+      operationId: listApprovals
+      tags: [approvals]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ratedUserId
+          in: query
+          schema:
+            type: string
+        - name: teamId
+          in: query
+          schema:
+            type: integer
+        - name: quarter
+          in: query
+          schema:
+            type: string
+        - name: year
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: List of approvals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Approval"
+    post:
+      operationId: createApproval
+      tags: [approvals]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApprovalRequest"
+      responses:
+        "201":
+          description: Approval created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+
+  /approvals/{approvalId}:
+    patch:
+      operationId: updateApproval
+      tags: [approvals]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateApprovalRequest"
+      responses:
+        "200":
+          description: Approval updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+
+  /disputes:
+    get:
+      operationId: listDisputes
+      tags: [disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: teamId
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Disputes list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Approval"
+
+  /disputes/{approvalId}:
+    post:
+      operationId: raiseDispute
+      tags: [disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DisputeRequest"
+      responses:
+        "200":
+          description: Dispute raised
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+    patch:
+      operationId: resolveDispute
+      tags: [disputes]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: approvalId
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveDisputeRequest"
+      responses:
+        "200":
+          description: Dispute resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Approval"
+
+  /send-reminder:
+    post:
+      operationId: sendReminder
+      tags: [users]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendReminderRequest"
+      responses:
+        "200":
+          description: Reminder sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required: [status]
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+      required: [error]
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+
+    LoginRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+      required: [username, password]
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        user:
+          $ref: "#/components/schemas/UserProfile"
+      required: [token, user]
+
+    UserProfile:
+      type: object
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [User, "Team Lead", Manager]
+        level:
+          type: string
+          enum: [L1, L2, L3]
+        teamId:
+          type: integer
+          nullable: true
+        teamName:
+          type: string
+          nullable: true
+      required: [userId, displayName, username, email, role, level]
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        teamId:
+          type: integer
+          nullable: true
+        role:
+          type: string
+
+    Team:
+      type: object
+      properties:
+        teamId:
+          type: integer
+        teamName:
+          type: string
+        tlUserId:
+          type: string
+          nullable: true
+        managerUserId:
+          type: string
+          nullable: true
+        tlDisplayName:
+          type: string
+          nullable: true
+        managerDisplayName:
+          type: string
+          nullable: true
+      required: [teamId, teamName]
+
+    UpdateTeamRequest:
+      type: object
+      properties:
+        teamName:
+          type: string
+        tlUserId:
+          type: string
+          nullable: true
+        managerUserId:
+          type: string
+          nullable: true
+
+    RegisterUserRequest:
+      type: object
+      properties:
+        displayName:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+        role:
+          type: string
+        level:
+          type: string
+        teamId:
+          type: integer
+          nullable: true
+      required: [displayName, username, email, password]
+
+    RatingItem:
+      type: object
+      properties:
+        itemId:
+          type: integer
+        itemName:
+          type: string
+        description:
+          type: string
+          nullable: true
+        level:
+          type: string
+          nullable: true
+        teamId:
+          type: integer
+        weight:
+          type: number
+        category:
+          type: string
+          nullable: true
+        targetRole:
+          type: string
+          nullable: true
+      required: [itemId, itemName, teamId, weight]
+
+    CreateItemRequest:
+      type: object
+      properties:
+        itemName:
+          type: string
+          maxLength: 50
+        description:
+          type: string
+          maxLength: 200
+        level:
+          type: string
+        teamId:
+          type: integer
+        weight:
+          type: number
+        category:
+          type: string
+        targetRole:
+          type: string
+      required: [itemName, teamId, weight, level]
+
+    UpdateItemRequest:
+      type: object
+      properties:
+        itemName:
+          type: string
+          maxLength: 50
+        description:
+          type: string
+          maxLength: 200
+        level:
+          type: string
+        weight:
+          type: number
+        category:
+          type: string
+        targetRole:
+          type: string
+
+    Rating:
+      type: object
+      properties:
+        ratingId:
+          type: integer
+        itemId:
+          type: integer
+        itemName:
+          type: string
+          nullable: true
+        userId:
+          type: string
+        ratingValue:
+          type: number
+          minimum: 0.1
+          maximum: 5
+        comment:
+          type: string
+          nullable: true
+        quarter:
+          type: string
+          enum: [Q1, Q2, Q3, Q4]
+        year:
+          type: integer
+        artifactLinks:
+          type: string
+          nullable: true
+        kpiAchieved:
+          type: string
+          nullable: true
+        projectName:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [saved, pending, submitted]
+        createdOn:
+          type: string
+          format: date-time
+        category:
+          type: string
+          nullable: true
+      required: [ratingId, itemId, userId, ratingValue, quarter, year, createdOn]
+
+    SubmitRatingRequest:
+      type: object
+      properties:
+        itemId:
+          type: integer
+        ratingValue:
+          type: number
+          minimum: 0.1
+          maximum: 5
+        comment:
+          type: string
+        quarter:
+          type: string
+          enum: [Q1, Q2, Q3, Q4]
+        year:
+          type: integer
+        artifactLinks:
+          type: string
+        kpiAchieved:
+          type: string
+        projectName:
+          type: string
+        status:
+          type: string
+          enum: [saved, pending, submitted]
+      required: [itemId, ratingValue, quarter, year]
+
+    UpdateRatingRequest:
+      type: object
+      properties:
+        ratingValue:
+          type: number
+          minimum: 0.1
+          maximum: 5
+        comment:
+          type: string
+        artifactLinks:
+          type: string
+        kpiAchieved:
+          type: string
+        projectName:
+          type: string
+        status:
+          type: string
+          enum: [saved, pending, submitted]
+
+    RatingSummary:
+      type: object
+      properties:
+        userId:
+          type: string
+        displayName:
+          type: string
+        quarter:
+          type: string
+        year:
+          type: integer
+        weightedScore:
+          type: number
+        performanceLabel:
+          type: string
+        categoryScores:
+          type: array
+          items:
+            $ref: "#/components/schemas/CategoryScore"
+      required: [userId, displayName, quarter, year, weightedScore, performanceLabel, categoryScores]
+
+    CategoryScore:
+      type: object
+      properties:
+        category:
+          type: string
+        weight:
+          type: number
+        avgRating:
+          type: number
+        weightedContribution:
+          type: number
+      required: [category, weight, avgRating, weightedContribution]
+
+    Approval:
+      type: object
+      properties:
+        approvalId:
+          type: integer
+        itemId:
+          type: integer
+        itemName:
+          type: string
+          nullable: true
+        teamId:
+          type: integer
+        ratedUserId:
+          type: string
+        ratedUserName:
+          type: string
+          nullable: true
+        selfRatingValue:
+          type: number
+          nullable: true
+        tlRatingValue:
+          type: number
+          nullable: true
+        tlLgtmStatus:
+          type: string
+          enum: [Pending, Approved, Rejected]
+        tlLgtmTimestamp:
+          type: string
+          format: date-time
+          nullable: true
+        tlLgtmByUserId:
+          type: string
+          nullable: true
+        finalLgtmStatus:
+          type: string
+          enum: [Pending, Approved, Rejected]
+        finalLgtmTimestamp:
+          type: string
+          format: date-time
+          nullable: true
+        finalLgtmByUserId:
+          type: string
+          nullable: true
+        disputeStatus:
+          type: boolean
+        disputeComment:
+          type: string
+          nullable: true
+        quarter:
+          type: string
+          nullable: true
+        year:
+          type: integer
+          nullable: true
+        category:
+          type: string
+          nullable: true
+        totalWeightedRating:
+          type: number
+          nullable: true
+      required: [approvalId, itemId, teamId, ratedUserId, tlLgtmStatus, finalLgtmStatus, disputeStatus]
+
+    CreateApprovalRequest:
+      type: object
+      properties:
+        itemId:
+          type: integer
+        teamId:
+          type: integer
+        ratedUserId:
+          type: string
+        tlRatingValue:
+          type: number
+          minimum: 0.1
+          maximum: 5
+        quarter:
+          type: string
+          enum: [Q1, Q2, Q3, Q4]
+        year:
+          type: integer
+      required: [itemId, teamId, ratedUserId, tlRatingValue, quarter, year]
+
+    UpdateApprovalRequest:
+      type: object
+      properties:
+        finalLgtmStatus:
+          type: string
+          enum: [Pending, Approved, Rejected]
+        tlLgtmStatus:
+          type: string
+          enum: [Pending, Approved, Rejected]
+
+    DisputeRequest:
+      type: object
+      properties:
+        disputeComment:
+          type: string
+      required: [disputeComment]
+
+    ResolveDisputeRequest:
+      type: object
+      properties:
+        resolution:
+          type: string
+          enum: [Approved, Rejected]
+        comment:
+          type: string
+      required: [resolution]
+
+    SendReminderRequest:
+      type: object
+      properties:
+        teamId:
+          type: integer
+        userId:
+          type: string
+          description: If provided, sends reminder to this specific user only
+        deadline:
+          type: string
+        customMessage:
+          type: string

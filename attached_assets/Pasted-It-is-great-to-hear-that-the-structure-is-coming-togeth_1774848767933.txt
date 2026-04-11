@@ -1,0 +1,51 @@
+It is great to hear that the structure is coming together! Making the KPIs dynamic is a massive step up for the application, but it does require careful synchronization between your database, backend APIs, and React forms.
+
+Before giving you the prompt, I want to gently flag one detail: you mentioned limiting Item_Name to VARCHAR(10). Ten characters is very short (for example, the word "Leadership" is exactly 10 characters, leaving no room for spaces or longer metrics like "Core Contributions"). I have adjusted the prompt to instruct Replit to use VARCHAR(50) for the name to prevent database truncation errors, while keeping the description at 200.
+
+Here is the exact prompt you can copy and paste into Replit to execute these updates:
+
+Copy-Paste This Prompt Into Replit
+Context:
+We are continuing the development of the Employee Performance Rating application. I need to fix a critical bug with form submission, add missing UI elements, and transition our rating system from hardcoded KPIs to dynamic, database-driven items. Please implement the following changes step-by-step.
+
+1. BUG FIX: Form Submission ("0 items submitted!")
+
+The user self-rating form is failing to submit data, returning a "0 items submitted!" message.
+
+Backend: Verify that the POST endpoint for submitting ratings is correctly parsing the incoming JSON payload and that the SQLAlchemy db.session.commit() is executing without validation errors.
+
+Frontend: Inspect the React onSubmit handler in the rating form. Ensure the payload structure exactly matches what the backend API expects (e.g., mapping Item_Id, Rating_Value, etc.) and that the state is not emptying out before the API call is made.
+
+2. UI UPDATE: Team Lead Notification Buttons
+
+In the Team Lead Dashboard (specifically in the "My Team" or "Approve Ratings" views), add a visible "Send Notification" button next to each team member whose ratings are pending or not started.
+
+Clicking this button should open a small modal or reveal a text area where the TL can draft a custom email message.
+
+Include a "Send Email" submit button that triggers the backend email function (using smtplib or console print for now) to notify the specific user.
+
+3. FEATURE ADDITION: Dynamic Rating Items (Database & Backend)
+
+We need to abandon hardcoded KPIs and use the ItemsToRate table dynamically. Ensure the SQLAlchemy model exists with these specific constraints:
+
+Item_Id: Primary Key, Integer.
+
+Item_Name: String/VARCHAR(50). (Set to 50 to accommodate longer KPI names safely).
+
+Description: String/VARCHAR(200).
+
+Team_Id: Foreign Key referencing the Teams table (Integer).
+
+Weight: Float (representing the percentage weight, e.g., 0.55 for 55%).
+
+Create APIs: Build routes for the Team Lead to POST new items, PUT (edit) existing items, and DELETE items. Build a GET route for users to fetch the items associated with their Team_Id.
+
+4. FEATURE ADDITION: Dynamic Rating Items (Frontend)
+
+Team Lead View: Add a new tab to the TL Sidebar called "Manage KPIs/Items". Create a form here with inputs for Item_Name, Description, and Weight. The TL should be able to add new rating criteria that will apply to their specific Team_Id. Add validation to warn the TL if the total weights do not equal 100% (or 1.0).
+
+User View: Refactor the User's "Submit Rating" form. On component mount, the form must GET the list of ItemsToRate from the backend based on their team. Map over this dynamic list to generate the rating input rows (0.1 to 5.0 float inputs) instead of using hardcoded state.
+
+Manager View: Ensure the Manager's "Final Approvals" view dynamically fetches and displays the specific ItemsToRate that the user and TL filled out, rather than static labels.
+
+Please execute the backend and database schema changes first, ensure the APIs work, and then update the React components to utilize the new dynamic data flow.

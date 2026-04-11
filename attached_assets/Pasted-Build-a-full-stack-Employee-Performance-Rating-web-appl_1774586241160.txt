@@ -1,0 +1,63 @@
+Build a full-stack Employee Performance Rating web application. I need the complete project built perfectly to minimize iterations. 
+
+### TECH STACK
+- Frontend: React.js (using Vite), Tailwind CSS (for styling and Dark/Light mode).
+- Backend: Python with Flask or FastAPI.
+- Database: SQLite (via SQLAlchemy or similar ORM) using standard SQL queries.
+- Authentication: JWT (JSON Web Tokens) with Bcrypt for secure password hashing (encryption/decryption).
+
+### APP THEME & BRANDING
+- The app must support a global Light Mode and Dark Mode toggle.
+- Use this logo for the login page and top navigation bar: https://www.highspring.com/wp-content/uploads/sites/2/2025/01/HS-black-logo.svg (Ensure it is visible in both dark and light modes; add a white background or invert filter for dark mode if necessary).
+
+### DATABASE SCHEMA (SQLAlchemy Models)
+1. `Users` Table: User_Id (PK, string), DisplayName, security_key, password (hashed TEXT), username, email, Team_Id (FK), Role (String: User, Team Lead, Manager), Level (String: L1, L2, L3).
+2. `Teams` Table: Team_Id (PK, int), Team_Name, TL_user_Id (FK to Users), Manager_user_Id (FK to Users).
+3. `ItemsToRate` Table: Item_Id (PK, int), Item_Name, Description, Team_Id (FK), Weight (Float). 
+4. `Ratings` Table: Rating_Id (PK), Item_Id (FK), User_Id (FK), Rating_Value (1 to 5), Comment (TEXT), Quarter (String: Q1, Q2, Q3, Q4), Year (int), Artifact_Links (TEXT), Created_on (Timestamp).
+5. `Approvals` Table: Approval_Id (PK), Item_Id (FK), Team_Id (FK), Rated_User_Id (FK to Users), TL_Rating_value (1 to 5), TL_LGTM_Status (default="Pending"), TL_LGTM_Timestamp, TL_LGTM_By_UserId (FK), Final_LGTM_Status (default="Pending"), Final_LGTM_Timestamp, Final_LGTM_By_UserId (FK), Dispute_Status (Boolean, default=False), Dispute_Comment (TEXT).
+
+### BUSINESS LOGIC & FORMULAS (From Spreadsheet)
+The rating system must calculate a Final Weighted Score using these specific KPI categories and weights:
+- Core Contributions (SCIM Project Delivery): 55% (0.55)
+- Org Contributions: 10% (0.10)
+- Value Addition: 10% (0.10)
+- Leave Management: 10% (0.10)
+- Subjective Feedback: 10% (0.10)
+- Self Learning & Development: 5% (0.05)
+
+Final Rating Score Mapping:
+- > 4.5: Exceptional (process dependency, falls under very critical)
+- 4.0 to 4.5: Excel exception (critical for the process)
+- 3.0 to 3.99: Meets expectations (average)
+- 2.0 to 2.99: Improvement needed (warning and feedback should be shared)
+- < 2.0: Unsatisfactory (PIP cases, feedback should be shared immediately)
+
+### ROLE-BASED ACCESS & VIEWS
+Create a secure Login Page that routes users to their respective dashboards based on their Role.
+
+1. USER VIEW:
+- Complete self-rating form based on the KPIs above.
+- View previous ratings with UI filters for Year and Quarter (Q1-Q4).
+- "Dispute Rating" button: If unsatisfied with a TL/Manager rating, user can open a dispute and add a comment.
+
+2. TEAM LEAD VIEW (Inherits User View + additions):
+- View a list of users mapped under them.
+- Submit TL ratings for their reports.
+- Solve/respond to disputes raised by their reports.
+- "Send Reminder" Button: Triggers a pre-generated, dynamic email to their reports saying "Ratings are live, please fill them out before the deadline."
+- Automated Email: The backend must send an email notification to the report as soon as the TL submits their rating (Use Python `smtplib` or print the email contents to the console for development).
+
+3. MANAGER VIEW (Inherits TL View + additions):
+- Can view all Team Leads and Users under their domain.
+- Provide final ratings for Team Leads.
+- Oversee escalated disputes.
+
+### EXECUTION STEPS FOR AI:
+1. Initialize the backend, database connection, and ORM models.
+2. Build the auth system (login, JWT generation, password hashing).
+3. Create the REST APIs for submitting ratings, fetching history (with year/quarter filters), handling disputes, and mock email triggers.
+4. Setup the Vite+React frontend with React Router for protected routes based on roles.
+5. Implement Tailwind layouts, the Light/Dark mode toggle, and the Logo.
+6. Build the specific dashboard views and forms incorporating the weighted score logic dynamically.
+Ensure the code is robust, handles errors gracefully, and includes a mock script to seed the database with one Manager, one Team Lead, and one User for testing.

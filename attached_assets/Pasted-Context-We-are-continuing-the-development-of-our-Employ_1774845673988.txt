@@ -1,0 +1,64 @@
+Context:
+We are continuing the development of our Employee Performance Rating application (React/Vite, Tailwind, Python FastAPI/Flask, SQLite). I need you to implement a specific set of bug fixes, feature enhancements, and UI overhauls. Please execute these changes step-by-step, ensuring the database schema, backend routes, and React components are all properly synchronized.
+
+1. BUG FIXES & FORM ADJUSTMENTS:
+
+Fix Form State Synchronization: Currently, when editing one metric in the rating form, all metrics update to the same value. Fix the React state handling in the form so that each KPI metric (Core Contributions, Org Contributions, etc.) maintains its own distinct state independently.
+
+Fix Form Submission: The rating form currently does not submit data to the backend database. Fix the onSubmit handler, ensure the API route correctly receives the payload, and verify that the data successfully commits to the Ratings and Approvals tables so the TL can view it.
+
+Change Input Type (Float Ratings): Remove the visual "Star" rating UI. Replace it with a number input field (or slider) that accepts float values specifically restricted to the range of 0.1 to 5.0 with a step="0.1".
+
+2. SIDEBAR NAVIGATION & ROUTING OVERHAUL:
+Implement a persistent Sidebar with a Hamburger menu toggle for all users. Implement protected routing to show different sidebar tabs based on the user's Role.
+
+USER VIEW Sidebar Tabs:
+
+Dashboard: Displays previous rating history only.
+
+Submit Rating: Contains the form to input and submit current self-ratings.
+
+TEAM LEAD (TL) VIEW Sidebar Tabs:
+
+Dashboard: Shows the TL's own rating history.
+
+My Team: A list of mapped team members. Clicking a member navigates to a detailed view of that member's rating history.
+
+Approve Ratings: Shows a list of pending ratings. The UI must display the team member's self-rating alongside an input field for the TL to provide their own rating (0.1 - 5.0). Crucial logic: Both the user's self-rating and the TL's rating must persist in the database.
+
+Manage Team: A view to add or remove team members from their specific team.
+
+MANAGER VIEW Sidebar Tabs:
+
+Includes all features of the TL view.
+
+Rate Team Leads: A dedicated section to view and rate Team Leads under them.
+
+Reassign Leads: If a TL is removed, provide a UI to assign a new TL to those orphaned team members.
+
+Final Approvals: A queue of ratings that have been approved by TLs. The Manager does not rate these members, but clicks a "Final LGTM" (Looks Good To Me) button to finalize the cycle.
+
+3. EMAIL NOTIFICATIONS & CUSTOMIZATION:
+
+Automated Triggers: Implement backend functions (using smtplib or console printing for dev) to trigger emails during state changes:
+
+Send an email to the User when their TL approves their rating.
+
+Send an email to the User when the Manager gives the Final Approval (Final LGTM).
+
+Custom Notification UI: Wherever there is a "Send Reminder" or "Send Notification" button in the TL or Manager views, add a text area above it. The TL/Manager must be able to type a custom email body into this text area, which is then sent via the backend to the target user.
+
+4. DATABASE SEEDING & MOCK DATA:
+Update the database initialization script to populate a richer set of mock data upon creation. Provide printouts of the login credentials in the backend console on startup.
+
+Accounts: Create 1 Manager, 2 Team Leads, and 3 Users.
+
+Mock Ratings: Generate 4 to 5 dummy rating entries.
+
+Set 2 of them to have a "Pending TL Approval" status.
+
+Set 2 of them to have "TL Approved" status but "Pending Manager Final LGTM" status.
+
+Set 1 of them as fully completed.
+
+Please review these instructions and implement the full-stack changes, starting with the backend database/schema adjustments, followed by API routes, and concluding with the React component updates.

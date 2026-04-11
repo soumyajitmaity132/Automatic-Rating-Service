@@ -1,0 +1,19 @@
+packages:
+  "framer-motion": "Page transitions and smooth animations"
+  "recharts": "Dashboard analytics charts and radar plots"
+  "date-fns": "Human-readable date formatting"
+  "react-hook-form": "Form state management"
+  "@hookform/resolvers": "Zod validation integration"
+  "zod": "Schema validation for forms"
+  "clsx": "Utility for constructing className strings conditionally"
+  "tailwind-merge": "Utility function to efficiently merge Tailwind CSS classes"
+
+images:
+  - path: "artifacts/performance-rating/public/images/login-bg.png"
+    description: "Abstract clean professional enterprise corporate blue tones gradient mesh background with subtle geometric glassmorphism elements"
+    aspect_ratio: "16:9"
+
+notes:
+  - Global window.fetch interceptor is used in App.tsx to automatically inject the Authorization Bearer token into all /api/* requests.
+  - The API types and hooks are imported directly from @workspace/api-client-react.
+  - Wouter is used for routing.
