@@ -1,4 +1,4 @@
-import { pgTable, serial, integer, text, real, boolean, timestamp, varchar } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, text, real, doublePrecision, boolean, timestamp, varchar } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { itemsToRateTable } from "./items";
@@ -30,7 +30,7 @@ export const approvalsTable = pgTable("approvals", {
   leadComment: text("lead_comment"),
   quarter: text("quarter"),
   year: integer("year"),
-  totalWeightedRating: real("total_weighted_rating"),
+  totalWeightedRating: doublePrecision("total_weighted_rating"),
 });
 
 export const insertApprovalSchema = createInsertSchema(approvalsTable).omit({

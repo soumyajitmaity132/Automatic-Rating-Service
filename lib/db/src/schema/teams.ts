@@ -5,7 +5,7 @@ import { z } from "zod/v4";
 export const teamsTable = pgTable("teams", {
   teamId: serial("team_id").primaryKey(),
   teamName: text("team_name").notNull(),
-  tlUserId: text("tl_user_id"),
+  tlUserId: text("tl_user_id").array(),
   managerUserId: text("manager_user_id"),
 });
 
