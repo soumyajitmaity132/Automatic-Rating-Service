@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { approvalsTable, itemsToRateTable, usersTable, ratingsTable, tlDraftTable } from "@workspace/db/schema";
 import { eq, and, inArray, isNull, desc } from "drizzle-orm";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
+import { sendEmail } from "../lib/mailer.js";
 
 const router = Router();
 
@@ -36,15 +37,6 @@ async function enrichApprovals(approvals: any[]) {
     year: a.year,
     totalWeightedRating: a.totalWeightedRating ?? null,
   }));
-}
-
-function printEmail(to: string, subject: string, body: string) {
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`[EMAIL NOTIFICATION]`);
-  console.log(`To:      ${to}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Body:\n${body}`);
-  console.log(`${"=".repeat(60)}\n`);
 }
 
 function normalizeProjectName(value: unknown): string | null {
@@ -249,11 +241,11 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
     const [item] = await db.select().from(itemsToRateTable).where(eq(itemsToRateTable.itemId, itemId));
 
     if (ratedUser) {
-      printEmail(
-        ratedUser.email,
-        "Your Performance Rating Has Been Reviewed by Your Team Lead",
-        `Dear ${ratedUser.displayName},\n\nYour Team Lead has submitted their rating for the following KPI:\n\nKPI: ${item?.itemName || "N/A"}\nYour Self-Rating: ${selfRatingValue ?? "N/A"}\nTL Rating: ${resolvedTlRatingValue}\nPeriod: ${quarter} ${year}\n\nPlease log in to the Performance Portal to view your evaluation and provide any feedback.\n\nRegards,\nPerformance Rating System`
-      );
+      await sendEmail({
+        to: ratedUser.email,
+        subject: "Your Performance Rating Has Been Reviewed by Your Team Lead",
+        text: `Dear ${ratedUser.displayName},\n\nYour Team Lead has submitted their rating for the following KPI:\n\nKPI: ${item?.itemName || "N/A"}\nYour Self-Rating: ${selfRatingValue ?? "N/A"}\nTL Rating: ${resolvedTlRatingValue}\nPeriod: ${quarter} ${year}\n\nPlease log in to the Performance Portal to view your evaluation and provide any feedback.\n\nRegards,\nPerformance Rating System`,
+      });
     }
 
     res.status(201).json((await enrichApprovals([approval]))[0]);
@@ -300,11 +292,11 @@ router.patch("/:approvalId", authenticate, async (req: AuthRequest, res) => {
       const [item] = await db.select().from(itemsToRateTable).where(eq(itemsToRateTable.itemId, approval.itemId));
 
       if (ratedUser) {
-        printEmail(
-          ratedUser.email,
-          "Your Performance Rating Has Received Final Approval",
-          `Dear ${ratedUser.displayName},\n\nCongratulations! Your performance rating has been finalized by the Manager.\n\nKPI: ${item?.itemName || "N/A"}\nTL Rating: ${approval.tlRatingValue ?? "N/A"}\nPeriod: ${approval.quarter} ${approval.year}\nFinal Status: APPROVED\n\nPlease log in to the Performance Portal to view your complete evaluation summary.\n\nRegards,\nPerformance Rating System`
-        );
+        await sendEmail({
+          to: ratedUser.email,
+          subject: "Your Performance Rating Has Received Final Approval",
+          text: `Dear ${ratedUser.displayName},\n\nCongratulations! Your performance rating has been finalized by the Manager.\n\nKPI: ${item?.itemName || "N/A"}\nTL Rating: ${approval.tlRatingValue ?? "N/A"}\nPeriod: ${approval.quarter} ${approval.year}\nFinal Status: APPROVED\n\nPlease log in to the Performance Portal to view your complete evaluation summary.\n\nRegards,\nPerformance Rating System`,
+        });
       }
     }
 

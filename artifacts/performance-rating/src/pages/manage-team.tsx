@@ -65,6 +65,7 @@ export default function ManageTeam() {
   const [reminderMsg, setReminderMsg] = useState("");
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [selectAll, setSelectAll] = useState(true);
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -137,6 +138,36 @@ export default function ManageTeam() {
   const handleToggleCycle = (checked: boolean) => {
     setPendingCycleState(checked);
     setCycleConfirmOpen(true);
+  };
+
+  const handleSendTestEmail = async () => {
+    try {
+      setIsSendingTestEmail(true);
+      const response = await fetch("/api/auth/test-email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.message ?? data?.error ?? "Failed to send test email");
+      }
+
+      toast({
+        title: "Test email sent",
+        description: data?.message ?? "SMTP test email sent successfully.",
+      });
+    } catch (error) {
+      toast({
+        title: "Unable to send test email",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSendingTestEmail(false);
+    }
   };
 
   const confirmCycleToggle = async () => {
@@ -370,6 +401,14 @@ export default function ManageTeam() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              <Button
+                variant="outline"
+                onClick={handleSendTestEmail}
+                disabled={isSendingTestEmail}
+                id="send-test-email-btn"
+              >
+                <Mail className="w-4 h-4 mr-1.5" /> {isSendingTestEmail ? "Sending..." : "Send Test Email"}
+              </Button>
               <Button
                 variant="outline"
                 onClick={openReminderModal}

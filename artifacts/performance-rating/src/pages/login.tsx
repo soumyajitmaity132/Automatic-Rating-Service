@@ -4,6 +4,7 @@ import { useAuth } from "@/lib/auth";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { motion } from "framer-motion";
 import { Lock, Mail } from "lucide-react";
@@ -11,6 +12,14 @@ import { Lock, Mail } from "lucide-react";
 export default function Login() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [forgotStep, setForgotStep] = useState<1 | 2>(1);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotCode, setForgotCode] = useState("");
+  const [forgotNewPassword, setForgotNewPassword] = useState("");
+  const [forgotConfirmPassword, setForgotConfirmPassword] = useState("");
+  const [isRequestingCode, setIsRequestingCode] = useState(false);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
   const { login } = useAuth();
   const { mutate: loginMutation, isPending } = useLogin();
   const { toast } = useToast();
@@ -33,6 +42,94 @@ export default function Login() {
         }
       }
     );
+  };
+
+  const handleRequestPasscode = async () => {
+    if (!forgotEmail.trim()) {
+      toast({ title: "Email required", variant: "destructive" });
+      return;
+    }
+
+    try {
+      setIsRequestingCode(true);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000);
+      const response = await fetch("/api/auth/forgot-password/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: forgotEmail.trim() }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.message ?? "Failed to request passcode");
+      }
+
+      setForgotStep(2);
+      toast({ title: "Passcode sent", description: "Check your email for the verification code." });
+    } catch (error) {
+      toast({
+        title: "Unable to send passcode",
+        description: error instanceof Error
+          ? error.name === "AbortError"
+            ? "Request timed out. Please verify SMTP settings and try again."
+            : error.message
+          : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsRequestingCode(false);
+    }
+  };
+
+  const handleResetPassword = async () => {
+    if (!forgotCode.trim() || !forgotNewPassword) {
+      toast({ title: "Code and new password are required", variant: "destructive" });
+      return;
+    }
+    if (forgotNewPassword.length < 6) {
+      toast({ title: "Password must be at least 6 characters", variant: "destructive" });
+      return;
+    }
+    if (forgotNewPassword !== forgotConfirmPassword) {
+      toast({ title: "Passwords do not match", variant: "destructive" });
+      return;
+    }
+
+    try {
+      setIsResettingPassword(true);
+      const response = await fetch("/api/auth/forgot-password/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: forgotEmail.trim(),
+          code: forgotCode.trim(),
+          newPassword: forgotNewPassword,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.message ?? "Failed to reset password");
+      }
+
+      toast({ title: "Password changed", description: "You can now sign in with your new password." });
+      setForgotOpen(false);
+      setForgotStep(1);
+      setForgotCode("");
+      setForgotNewPassword("");
+      setForgotConfirmPassword("");
+    } catch (error) {
+      toast({
+        title: "Unable to reset password",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsResettingPassword(false);
+    }
   };
 
   return (
@@ -71,7 +168,7 @@ export default function Login() {
                 <Mail className="absolute left-3.5 top-3.5 h-5 w-5 text-muted-foreground" />
                 <Input
                   type="text"
-                  placeholder="Username"
+                  placeholder="Username or Email"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   className="pl-11 h-12 bg-background/50 border-border/50 focus:bg-background rounded-xl"
@@ -99,7 +196,99 @@ export default function Login() {
             >
               {isPending ? "Authenticating..." : "Sign In"}
             </Button>
+            <Button
+              type="button"
+              variant="link"
+              className="w-full text-sm"
+              onClick={() => {
+                setForgotOpen(true);
+                setForgotStep(1);
+                setForgotCode("");
+                setForgotNewPassword("");
+                setForgotConfirmPassword("");
+              }}
+            >
+              Forgot Password?
+            </Button>
           </form>
+
+          <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle>Forgot Password</DialogTitle>
+                <DialogDescription>
+                  {forgotStep === 1
+                    ? "Step 1: Enter your email to receive a verification passcode."
+                    : "Step 2: Enter passcode and set your new password."}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <label className="text-sm font-medium">Email</label>
+                  <Input
+                    type="email"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    disabled={forgotStep === 2}
+                  />
+                </div>
+
+                {forgotStep === 2 && (
+                  <>
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">Passcode</label>
+                      <Input
+                        value={forgotCode}
+                        onChange={(e) => setForgotCode(e.target.value)}
+                        placeholder="6-digit code"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">New Password</label>
+                      <Input
+                        type="password"
+                        value={forgotNewPassword}
+                        onChange={(e) => setForgotNewPassword(e.target.value)}
+                        placeholder="Minimum 6 characters"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-sm font-medium">Confirm Password</label>
+                      <Input
+                        type="password"
+                        value={forgotConfirmPassword}
+                        onChange={(e) => setForgotConfirmPassword(e.target.value)}
+                        placeholder="Re-enter new password"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <DialogFooter className="gap-2">
+                {forgotStep === 1 ? (
+                  <Button onClick={handleRequestPasscode} disabled={isRequestingCode}>
+                    {isRequestingCode ? "Sending..." : "Send Passcode"}
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={() => setForgotStep(1)}
+                      disabled={isResettingPassword}
+                    >
+                      Back
+                    </Button>
+                    <Button onClick={handleResetPassword} disabled={isResettingPassword}>
+                      {isResettingPassword ? "Updating..." : "Change Password"}
+                    </Button>
+                  </>
+                )}
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </Card>
       </motion.div>
     </div>

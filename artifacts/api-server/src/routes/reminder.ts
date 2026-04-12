@@ -3,17 +3,9 @@ import { db } from "@workspace/db";
 import { usersTable, teamsTable } from "@workspace/db/schema";
 import { eq } from "drizzle-orm";
 import { authenticate, AuthRequest, requireRole } from "../middlewares/authenticate.js";
+import { sendEmail } from "../lib/mailer.js";
 
 const router = Router();
-
-function printEmail(to: string, subject: string, body: string) {
-  console.log(`\n${"=".repeat(60)}`);
-  console.log(`[EMAIL REMINDER]`);
-  console.log(`To:      ${to}`);
-  console.log(`Subject: ${subject}`);
-  console.log(`Body:\n${body}`);
-  console.log(`${"=".repeat(60)}\n`);
-}
 
 router.post("/", authenticate, requireRole("Team Lead", "Manager"), async (req: AuthRequest, res) => {
   try {
@@ -33,7 +25,11 @@ router.post("/", authenticate, requireRole("Team Lead", "Manager"), async (req: 
         ? `Dear ${member.displayName},\n\n${customMessage}\n\n${deadlineText}\n\nRegards,\n${currentUser.displayName}`
         : `Dear ${member.displayName},\n\nYour performance ratings for this quarter are pending.\n${deadlineText}\n\nPlease log in and complete your self-ratings at your earliest convenience.\n\nSent by: ${currentUser.displayName}`;
 
-      printEmail(member.email, "Reminder: Your Performance Ratings Are Pending", emailBody);
+      await sendEmail({
+        to: member.email,
+        subject: "Reminder: Your Performance Ratings Are Pending",
+        text: emailBody,
+      });
       res.json({ message: `Reminder sent to ${member.displayName}` });
       return;
     }
@@ -57,7 +53,11 @@ router.post("/", authenticate, requireRole("Team Lead", "Manager"), async (req: 
         ? `Dear ${member.displayName},\n\n${customMessage}\n\n${deadlineText}\n\nRegards,\n${currentUser.displayName}`
         : defaultBody;
 
-      printEmail(member.email, "Action Required: Performance Ratings Are Now Live!", emailBody);
+      await sendEmail({
+        to: member.email,
+        subject: "Action Required: Performance Ratings Are Now Live!",
+        text: emailBody,
+      });
     }
 
     res.json({ message: `Reminder sent to ${userMembers.length} team member(s)` });
