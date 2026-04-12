@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { usersTable, teamsTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { authenticate, AuthRequest, requireRole } from "../middlewares/authenticate.js";
 import { hashPassword } from "../lib/auth.js";
 import { randomUUID } from "crypto";
@@ -134,6 +134,45 @@ router.post("/register", authenticate, requireRole("Team Lead", "Manager"), asyn
     res.status(201).json(toUserResponse(user, teamName));
   } catch (err) {
     req.log.error(err, "Register user error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.get("/no-leads", authenticate, requireRole("Manager"), async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+
+    const [manager] = await db
+      .select()
+      .from(usersTable)
+      .where(eq(usersTable.userId, currentUser.userId));
+
+    if (!manager) {
+      res.status(404).json({ error: "Manager not found" });
+      return;
+    }
+
+    const managerProcess = manager.process?.trim() ?? null;
+
+    const users = managerProcess
+      ? await db
+          .select()
+          .from(usersTable)
+          .where(
+            and(
+              eq(usersTable.role, "User"),
+              isNull(usersTable.teamId),
+              sql`lower(trim(${usersTable.process})) = lower(trim(${managerProcess}))`,
+            ),
+          )
+      : await db
+          .select()
+          .from(usersTable)
+          .where(and(eq(usersTable.role, "User"), isNull(usersTable.teamId)));
+
+    res.json(users.map((u) => toUserResponse(u, null)));
+  } catch (err) {
+    req.log.error(err, "List no-leads users error");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });

@@ -4,7 +4,7 @@ import { Link, useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import {
   LogOut, LayoutDashboard, ClipboardList, CheckSquare,
-  Settings, UserCheck, GitBranch, ShieldCheck, Moon, Sun, Menu, X, Star, ClipboardCheck
+  Settings, UserCheck, GitBranch, ShieldCheck, Moon, Sun, Menu, X, Star, ClipboardCheck, UserX
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -22,6 +22,7 @@ const navItems: NavItem[] = [
   { href: "/refered-ratings",icon: <ClipboardCheck className="w-5 h-5" />,  label: "Refered Ratings", roles: ["Team Lead", "Manager"] },
   { href: "/manage-kpis",    icon: <ClipboardList className="w-5 h-5" />,    label: "Manage KPIs",     roles: ["Team Lead", "Manager"] },
   { href: "/manage-leads",   icon: <UserCheck className="w-5 h-5" />,       label: "Manage Leads",    roles: ["Manager"] },
+  { href: "/no-leads",       icon: <UserX className="w-5 h-5" />,           label: "No Leads",        roles: ["Manager"] },
   { href: "/manage-team",    icon: <Settings className="w-5 h-5" />,        label: "Manage Team",     roles: ["Team Lead", "Manager"] },
   { href: "/rate-tls",       icon: <UserCheck className="w-5 h-5" />,       label: "Rate Team Leads", roles: ["Manager"] },
   { href: "/reassign-leads", icon: <GitBranch className="w-5 h-5" />,       label: "Reassign Leads",  roles: ["Manager"] },

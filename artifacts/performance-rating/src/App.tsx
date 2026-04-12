@@ -17,6 +17,7 @@ import FinalApprovals from "@/pages/final-approvals";
 import ManageKPIs from "@/pages/manage-kpis";
 import ManageLeads from "@/pages/manage-leads";
 import ReferedRatings from "@/pages/refered-ratings";
+import NoLeads from "@/pages/no-leads";
 
 setupFetchInterceptor();
 
@@ -44,6 +45,7 @@ function Router() {
       <Route path="/final-approvals" component={FinalApprovals} />
       <Route path="/manage-kpis" component={ManageKPIs} />
       <Route path="/manage-leads" component={ManageLeads} />
+      <Route path="/no-leads" component={NoLeads} />
       <Route component={NotFound} />
     </Switch>
   );
