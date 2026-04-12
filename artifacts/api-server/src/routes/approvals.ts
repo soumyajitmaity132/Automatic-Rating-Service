@@ -45,6 +45,10 @@ function normalizeProjectName(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function ratingProjectKey(itemId: number, projectName?: string | null): string {
+  return `${itemId}::${(projectName ?? "").trim()}`;
+}
+
 router.get("/", authenticate, async (req: AuthRequest, res) => {
   try {
     const { ratedUserId, teamId, quarter, year } = req.query as any;
@@ -69,6 +73,142 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
     res.json(await enrichApprovals(approvals));
   } catch (err) {
     req.log.error(err, "List approvals error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+router.post("/submit-user", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role !== "Team Lead" && currentUser.role !== "Manager") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const ratedUserId = String(req.body?.ratedUserId ?? "").trim();
+    const quarter = String(req.body?.quarter ?? "").trim();
+    const year = Number.parseInt(String(req.body?.year ?? ""), 10);
+    const teamId = Number.parseInt(String(req.body?.teamId ?? ""), 10);
+
+    if (!ratedUserId || !quarter || Number.isNaN(year) || Number.isNaN(teamId)) {
+      res.status(400).json({ error: "ratedUserId, teamId, quarter and year are required" });
+      return;
+    }
+
+    if (currentUser.role === "Team Lead") {
+      if (!currentUser.teamId || currentUser.teamId !== teamId) {
+        res.status(403).json({ error: "Team Lead can only submit for own team" });
+        return;
+      }
+    }
+
+    const [existingForPeriod] = await db
+      .select({ approvalId: approvalsTable.approvalId })
+      .from(approvalsTable)
+      .where(
+        and(
+          eq(approvalsTable.ratedUserId, ratedUserId),
+          eq(approvalsTable.quarter, quarter),
+          eq(approvalsTable.year, year),
+        ),
+      )
+      .limit(1);
+
+    if (existingForPeriod) {
+      res.status(409).json({
+        error: "Already submitted",
+        message: `Ratings already submitted for ${quarter} ${year}; re-submission is not allowed.`,
+      });
+      return;
+    }
+
+    const userRatings = await db
+      .select()
+      .from(ratingsTable)
+      .where(
+        and(
+          eq(ratingsTable.userId, ratedUserId),
+          eq(ratingsTable.quarter, quarter),
+          eq(ratingsTable.year, year),
+        ),
+      );
+
+    if (userRatings.length === 0) {
+      res.status(400).json({ error: "No self-ratings found for this user and period" });
+      return;
+    }
+
+    const activeDrafts = await db
+      .select()
+      .from(tlDraftTable)
+      .where(
+        and(
+          eq(tlDraftTable.ratedUserId, ratedUserId),
+          eq(tlDraftTable.quarter, quarter),
+          eq(tlDraftTable.year, year),
+          eq(tlDraftTable.isActive, true),
+        ),
+      )
+      .orderBy(desc(tlDraftTable.updatedOn));
+
+    const draftByKey = new Map<string, typeof tlDraftTable.$inferSelect>();
+    for (const draft of activeDrafts) {
+      const key = ratingProjectKey(draft.itemId, draft.projectName);
+      if (!draftByKey.has(key)) {
+        draftByKey.set(key, draft);
+      }
+    }
+
+    const missingDraft = userRatings.find((rating) => {
+      const key = ratingProjectKey(rating.itemId, rating.projectName);
+      const draft = draftByKey.get(key);
+      return !draft || draft.ratingValue == null;
+    });
+
+    if (missingDraft) {
+      res.status(400).json({
+        error: "Drafts required",
+        message: "Save TL drafts for all rows before final submit.",
+      });
+      return;
+    }
+
+    let createdCount = 0;
+    for (const rating of userRatings) {
+      const key = ratingProjectKey(rating.itemId, rating.projectName);
+      const draft = draftByKey.get(key)!;
+
+      await db.insert(approvalsTable).values({
+        itemId: rating.itemId,
+        teamId,
+        ratedUserId,
+        projectName: rating.projectName,
+        selfRatingValue: rating.ratingValue,
+        tlRatingValue: draft.ratingValue,
+        leadComment: draft.leadComment ?? null,
+        tlLgtmStatus: "Approved",
+        tlLgtmTimestamp: new Date(),
+        tlLgtmByUserId: currentUser.userId,
+        finalLgtmStatus: "Pending",
+        disputeStatus: false,
+        quarter,
+        year,
+      });
+
+      await db
+        .update(tlDraftTable)
+        .set({ isActive: false, updatedOn: new Date() })
+        .where(eq(tlDraftTable.draftId, draft.draftId));
+
+      createdCount += 1;
+    }
+
+    res.status(201).json({
+      message: `Submitted ${createdCount} row(s) for ${quarter} ${year}`,
+      count: createdCount,
+    });
+  } catch (err) {
+    req.log.error(err, "Submit user approvals error");
     res.status(500).json({ error: "Internal Server Error" });
   }
 });

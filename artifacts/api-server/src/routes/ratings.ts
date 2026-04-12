@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { ratingsTable, itemsToRateTable, usersTable, teamsTable } from "@workspace/db/schema";
-import { eq, and, or, isNull } from "drizzle-orm";
+import { ratingsTable, itemsToRateTable, usersTable, teamsTable, approvalsTable, tlDraftTable } from "@workspace/db/schema";
+import { eq, and, or, isNull, inArray } from "drizzle-orm";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
 import { getRatingCycleStatus } from "../lib/rating-cycle.js";
 
@@ -43,6 +43,147 @@ function normalizeOptionalText(value: unknown): string | null {
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
 }
+
+router.get("/member-stages", authenticate, async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    if (currentUser.role === "User") {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const quarter = String(req.query.quarter ?? "").trim();
+    const year = Number.parseInt(String(req.query.year ?? ""), 10);
+    let teamId = Number.parseInt(String(req.query.teamId ?? ""), 10);
+
+    if (!quarter || Number.isNaN(year)) {
+      res.status(400).json({ error: "quarter and year are required" });
+      return;
+    }
+
+    if (Number.isNaN(teamId)) {
+      teamId = currentUser.teamId ?? Number.NaN;
+    }
+
+    if (Number.isNaN(teamId)) {
+      res.status(400).json({ error: "teamId is required" });
+      return;
+    }
+
+    if (currentUser.role === "Team Lead" && currentUser.teamId && teamId !== currentUser.teamId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const teamUsers = await db
+      .select({ userId: usersTable.userId, displayName: usersTable.displayName, level: usersTable.level })
+      .from(usersTable)
+      .where(and(eq(usersTable.teamId, teamId), eq(usersTable.role, "User")));
+
+    if (teamUsers.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const userIds = teamUsers.map((user) => user.userId);
+
+    const ratingRows = await db
+      .select({
+        userId: ratingsTable.userId,
+        itemId: ratingsTable.itemId,
+        projectName: ratingsTable.projectName,
+        status: ratingsTable.status,
+      })
+      .from(ratingsTable)
+      .where(
+        and(
+          inArray(ratingsTable.userId, userIds),
+          eq(ratingsTable.quarter, quarter),
+          eq(ratingsTable.year, year),
+        ),
+      );
+
+    const approvalRows = await db
+      .select({
+        ratedUserId: approvalsTable.ratedUserId,
+        itemId: approvalsTable.itemId,
+        projectName: approvalsTable.projectName,
+        tlRatingValue: approvalsTable.tlRatingValue,
+        tlLgtmStatus: approvalsTable.tlLgtmStatus,
+      })
+      .from(approvalsTable)
+      .where(
+        and(
+          inArray(approvalsTable.ratedUserId, userIds),
+          eq(approvalsTable.quarter, quarter),
+          eq(approvalsTable.year, year),
+        ),
+      );
+
+    const draftRows = await db
+      .select({ ratedUserId: tlDraftTable.ratedUserId })
+      .from(tlDraftTable)
+      .where(
+        and(
+          inArray(tlDraftTable.ratedUserId, userIds),
+          eq(tlDraftTable.quarter, quarter),
+          eq(tlDraftTable.year, year),
+        ),
+      );
+
+    const draftCountByUser = new Map<string, number>();
+    for (const row of draftRows) {
+      draftCountByUser.set(row.ratedUserId, (draftCountByUser.get(row.ratedUserId) ?? 0) + 1);
+    }
+
+    const stageRows = teamUsers.map((member) => {
+      const memberRatings = ratingRows.filter((row) => row.userId === member.userId);
+      const submittedRatings = memberRatings.filter((row) => normalizeRatingStatus(row.status) === "submitted");
+      const savedRatings = memberRatings.filter((row) => normalizeRatingStatus(row.status) !== "submitted");
+
+      let stage = 1;
+      let stageLabel = "Not Started";
+
+      if (memberRatings.length === 0) {
+        stage = 1;
+        stageLabel = "Not Started";
+      } else if (submittedRatings.length === 0 && savedRatings.length > 0) {
+        stage = 2;
+        stageLabel = "Saved";
+      } else {
+        const userApprovals = approvalRows.filter((row) => row.ratedUserId === member.userId);
+        const hasLeadSubmitted = userApprovals.length > 0;
+
+        if (hasLeadSubmitted) {
+          stage = 5;
+          stageLabel = "Lead Submit";
+        } else {
+          const hasTlProgress = (draftCountByUser.get(member.userId) ?? 0) > 0;
+          if (hasTlProgress) {
+            stage = 4;
+            stageLabel = "Lead Pending";
+          } else {
+            stage = 3;
+            stageLabel = "Submitted";
+          }
+        }
+      }
+
+      return {
+        userId: member.userId,
+        displayName: member.displayName,
+        level: member.level,
+        stage,
+        stageLabel,
+      };
+    });
+
+    res.json(stageRows);
+  } catch (err) {
+    req.log.error(err, "List member stages error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 
 router.get("/summary", authenticate, async (req: AuthRequest, res) => {
   try {

@@ -3,7 +3,7 @@ import { useAuth } from "@/lib/auth";
 import { Layout } from "@/components/layout";
 import {
   useListUsers, useListRatings, useListApprovals, useListDisputes,
-  useCreateApproval, useResolveDispute, useSendReminder, useListItems,
+  useResolveDispute, useSendReminder, useListItems,
   getListItemsQueryKey, RatingQuarter, UserProfile, Rating
 } from "@workspace/api-client-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -54,6 +54,44 @@ interface ReferableTeamLead {
   level: string;
   teamId: number | null;
   teamName: string | null;
+}
+
+interface MemberStageInfo {
+  userId: string;
+  displayName: string;
+  level: string;
+  stage: number;
+  stageLabel: string;
+}
+
+async function listMemberStages(params: { teamId: number; quarter: RatingQuarter; year: number }): Promise<MemberStageInfo[]> {
+  const query = new URLSearchParams({
+    teamId: String(params.teamId),
+    quarter: params.quarter,
+    year: String(params.year),
+  });
+  const response = await fetch(`/api/ratings/member-stages?${query.toString()}`);
+  if (!response.ok) {
+    throw new Error("Failed to load member stages");
+  }
+  return response.json();
+}
+
+function stageBadgeClasses(stage: number): string {
+  switch (stage) {
+    case 1:
+      return "bg-muted text-muted-foreground";
+    case 2:
+      return "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300";
+    case 3:
+      return "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300";
+    case 4:
+      return "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300";
+    case 5:
+      return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300";
+    default:
+      return "bg-muted text-muted-foreground";
+  }
 }
 
 async function listTlDrafts(params: { ratedUserId: string; quarter: RatingQuarter; year: number }): Promise<TlDraft[]> {
@@ -140,6 +178,28 @@ async function referRating(payload: { ratingId: number; referencedTlUserId: stri
   }
 }
 
+async function submitApprovalsForUser(payload: {
+  ratedUserId: string;
+  teamId: number;
+  quarter: RatingQuarter;
+  year: number;
+}): Promise<{ message: string; count: number }> {
+  const response = await fetch("/api/approvals/submit-user", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    throw new Error(errorBody?.message ?? errorBody?.error ?? "Failed to submit approvals");
+  }
+
+  return response.json();
+}
+
 function NotifyDialog({ member, sender, open, onClose }: {
   member: UserProfile;
   sender: UserProfile;
@@ -196,12 +256,13 @@ function NotifyDialog({ member, sender, open, onClose }: {
   );
 }
 
-function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
+function MemberPanel({ member, quarter, year, currentUser, referableLeads, stageInfo }: {
   member: UserProfile;
   quarter: RatingQuarter;
   year: number;
   currentUser: UserProfile;
   referableLeads: ReferableTeamLead[];
+  stageInfo?: MemberStageInfo;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -221,6 +282,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
   const [referRatingContext, setReferRatingContext] = useState<Rating | null>(null);
   const [selectedReferLeadId, setSelectedReferLeadId] = useState<string>("");
   const [isReferring, setIsReferring] = useState(false);
+  const [isSubmittingForUser, setIsSubmittingForUser] = useState(false);
 
   const { data: ratings } = useListRatings(
     { userId: member.userId, quarter, year },
@@ -241,8 +303,6 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
       enabled: open,
     },
   });
-
-  const { mutate: createApproval, isPending } = useCreateApproval();
 
   const approvalByItem = useMemo(
     () => new Map((approvals ?? []).map(a => [getRatingRowKey(a.itemId, (a as any).projectName), a])),
@@ -430,8 +490,19 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
   const submittedCount = approvals?.filter(a => a.tlLgtmStatus === "Approved").length ?? 0;
   const totalCount = ratings?.length ?? 0;
   const hasPending = !open || submittedCount < totalCount || totalCount === 0;
+  const alreadySubmittedForPeriod = (approvals?.length ?? 0) > 0;
+  const isStage5 = stageInfo?.stage === 5 || alreadySubmittedForPeriod;
 
   const handleSubmitForUser = async () => {
+    if (alreadySubmittedForPeriod) {
+      toast({
+        title: "Already submitted",
+        description: `Ratings for ${member.displayName} are already submitted for ${quarter} ${year}.`,
+        variant: "destructive",
+      });
+      return;
+    }
+
     const memberRatings = ratings ?? [];
     if (memberRatings.length === 0) {
       toast({ title: "No self-ratings yet", description: "This member has not submitted any ratings.", variant: "destructive" });
@@ -448,39 +519,32 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
       return;
     }
 
-    let successCount = 0;
-    for (const rating of memberRatings) {
-      const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
-      const activeDraft = activeDraftByItem.get(rowKey);
-      if (!activeDraft || activeDraft.ratingValue == null) {
-        continue;
-      }
-      await new Promise<void>((resolve) => {
-        createApproval({
-          data: {
-            itemId: rating.itemId,
-            projectName: rating.projectName,
-            teamId: currentUser.teamId!,
-            ratedUserId: rating.userId,
-            tlRatingValue: activeDraft.ratingValue,
-            quarter,
-            year,
-            leadComment: activeDraft.leadComment ?? "",
-          } as any,
-        }, {
-          onSuccess: () => {
-            successCount++;
-            resolve();
-          },
-          onError: () => resolve(),
-        });
+    try {
+      setIsSubmittingForUser(true);
+      const result = await submitApprovalsForUser({
+        ratedUserId: member.userId,
+        teamId: currentUser.teamId!,
+        quarter,
+        year,
       });
-    }
 
-    toast({ title: `Submitted for ${member.displayName}`, description: `${successCount} row(s) processed.` });
-    setDrafts([]);
-    queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/ratings"] });
+      toast({
+        title: `Submitted for ${member.displayName}`,
+        description: result.message ?? `${result.count} row(s) processed.`,
+      });
+      setDrafts([]);
+      queryClient.invalidateQueries({ queryKey: ["/api/approvals"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ratings"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ratings/member-stages"] });
+    } catch (error) {
+      toast({
+        title: "Submission blocked",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSubmittingForUser(false);
+    }
   };
 
   const pendingDraftRows = useMemo(() => {
@@ -646,7 +710,14 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
             </div>
             <div>
               <p className="font-semibold">{member.displayName}</p>
-              <p className="text-sm text-muted-foreground">{member.level}</p>
+              <div className="flex items-center gap-2 mt-0.5">
+                <p className="text-sm text-muted-foreground">{member.level}</p>
+                {stageInfo && (
+                  <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${stageBadgeClasses(stageInfo.stage)}`}>
+                    Stage {stageInfo.stage}: {stageInfo.stageLabel}
+                  </span>
+                )}
+              </div>
             </div>
           </button>
           <div className="flex items-center gap-2">
@@ -706,7 +777,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
                       <TableHead>Artifacts Link</TableHead>
                       <TableHead>Lead Rating</TableHead>
                       <TableHead>Lead Comment</TableHead>
-                      <TableHead>Refer</TableHead>
+                      {!isStage5 && <TableHead>Refer</TableHead>}
                       <TableHead>Draft</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -741,56 +812,72 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
                             )}
                           </TableCell>
                           <TableCell>
-                            <div className="space-y-1">
-                              <Input
-                                type="number"
-                                min="0.1"
-                                max="5.0"
-                                step="0.1"
-                                placeholder="0.1–5.0"
-                                value={rawVal}
-                                onChange={(e) => setTlVals((prev) => ({ ...prev, [rowKey]: e.target.value }))}
-                                className="w-28"
-                              />
-                              {label && <p className="text-xs text-muted-foreground">{label}</p>}
-                            </div>
+                            {isStage5 ? (
+                              <div className="border rounded-md px-3 py-2 text-sm min-h-[38px] bg-muted/20">
+                                {(approvalByItem.get(rowKey)?.tlRatingValue ?? null) != null
+                                  ? Number(approvalByItem.get(rowKey)?.tlRatingValue).toFixed(1)
+                                  : "—"}
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <Input
+                                  type="number"
+                                  min="0.1"
+                                  max="5.0"
+                                  step="0.1"
+                                  placeholder="0.1–5.0"
+                                  value={rawVal}
+                                  onChange={(e) => setTlVals((prev) => ({ ...prev, [rowKey]: e.target.value }))}
+                                  className="w-28"
+                                />
+                                {label && <p className="text-xs text-muted-foreground">{label}</p>}
+                              </div>
+                            )}
                           </TableCell>
                           <TableCell>
-                            <div className="space-y-1">
-                              <p className="text-xs font-medium">
-                                Lead comment
-                                {isLeadRatingDifferent && (
-                                  <span className="text-red-500 ml-0.5">*</span>
-                                )}
-                              </p>
-                              <Textarea
-                                value={leadComments[rowKey] ?? ""}
-                                onChange={(e) =>
-                                  setLeadComments((prev) => ({ ...prev, [rowKey]: e.target.value }))
-                                }
-                                placeholder={isLeadRatingDifferent ? "Required when rating differs" : "Lead comment"}
-                                className={`min-h-[72px]${isLeadRatingDifferent && !(leadComments[rowKey] ?? "").trim() ? " border-red-500 focus-visible:ring-red-500" : ""}`}
-                              />
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <div className="space-y-2 min-w-[170px]">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="gap-1.5"
-                                onClick={() => openReferDialog(rating)}
-                              >
-                                <UserPlus className="w-3.5 h-3.5" />
-                                Refer
-                              </Button>
-                              {(rating as any).referencedTlUserId && (
-                                <p className="text-xs text-muted-foreground whitespace-pre-wrap">
-                                  Referred to: {leadNameById.get((rating as any).referencedTlUserId) ?? (rating as any).referencedTlUserId}
+                            {isStage5 ? (
+                              <div className="border rounded-md px-3 py-2 text-sm min-h-[72px] whitespace-pre-wrap bg-muted/20">
+                                {(approvalByItem.get(rowKey) as any)?.leadComment?.trim() || "—"}
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <p className="text-xs font-medium">
+                                  Lead comment
+                                  {isLeadRatingDifferent && (
+                                    <span className="text-red-500 ml-0.5">*</span>
+                                  )}
                                 </p>
-                              )}
-                            </div>
+                                <Textarea
+                                  value={leadComments[rowKey] ?? ""}
+                                  onChange={(e) =>
+                                    setLeadComments((prev) => ({ ...prev, [rowKey]: e.target.value }))
+                                  }
+                                  placeholder={isLeadRatingDifferent ? "Required when rating differs" : "Lead comment"}
+                                  className={`min-h-[72px]${isLeadRatingDifferent && !(leadComments[rowKey] ?? "").trim() ? " border-red-500 focus-visible:ring-red-500" : ""}`}
+                                />
+                              </div>
+                            )}
                           </TableCell>
+                          {!isStage5 && (
+                            <TableCell>
+                              <div className="space-y-2 min-w-[170px]">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="gap-1.5"
+                                  onClick={() => openReferDialog(rating)}
+                                >
+                                  <UserPlus className="w-3.5 h-3.5" />
+                                  Refer
+                                </Button>
+                                {(rating as any).referencedTlUserId && (
+                                  <p className="text-xs text-muted-foreground whitespace-pre-wrap">
+                                    Referred to: {leadNameById.get((rating as any).referencedTlUserId) ?? (rating as any).referencedTlUserId}
+                                  </p>
+                                )}
+                              </div>
+                            </TableCell>
+                          )}
                           <TableCell>
                             <div className="space-y-2 min-w-[160px]">
                               <div className="flex flex-wrap gap-2">
@@ -804,7 +891,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
                                   History
                                 </Button>
                               </div>
-                              {activeDraft && (
+                              {!isStage5 && activeDraft && (
                                 <p className="text-xs text-muted-foreground whitespace-pre-wrap">
                                   Active: {activeDraft.teamLeadDisplayName ?? activeDraft.teamLeadUserId}
                                   {activeDraft.teamLeadUserId === currentUser.userId ? " (you)" : ""}
@@ -818,27 +905,29 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads }: {
                   </TableBody>
                 </Table>
 
-                <div className="flex justify-end">
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      onClick={handleSaveAllDrafts}
-                      disabled={isSavingAllDrafts || pendingDraftRows.length === 0}
-                    >
-                      {isSavingAllDrafts ? "Saving..." : `Save all changes (${pendingDraftRows.length})`}
-                    </Button>
-                    <Button
-                      onClick={handleSubmitForUser}
-                      disabled={isPending || (ratings ?? []).some((rating) => {
-                        const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
-                        const value = Number(activeDraftByItem.get(rowKey)?.ratingValue);
-                        return Number.isNaN(value) || value < 0.1 || value > 5.0;
-                      })}
-                    >
-                      {isPending ? "Submitting..." : `Submit for ${member.displayName}`}
-                    </Button>
+                {!isStage5 && (
+                  <div className="flex justify-end">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        onClick={handleSaveAllDrafts}
+                        disabled={isSavingAllDrafts || pendingDraftRows.length === 0}
+                      >
+                        {isSavingAllDrafts ? "Saving..." : `Save all changes (${pendingDraftRows.length})`}
+                      </Button>
+                      <Button
+                        onClick={handleSubmitForUser}
+                        disabled={alreadySubmittedForPeriod || isSubmittingForUser || (ratings ?? []).some((rating) => {
+                          const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
+                          const value = Number(activeDraftByItem.get(rowKey)?.ratingValue);
+                          return Number.isNaN(value) || value < 0.1 || value > 5.0;
+                        })}
+                      >
+                        {isSubmittingForUser ? "Submitting..." : `Submit for ${member.displayName}`}
+                      </Button>
+                    </div>
                   </div>
-                </div>
+                )}
               </>
             )}
           </div>
@@ -971,6 +1060,7 @@ export default function ApproveRatings() {
   const [quarter, setQuarter] = useState<RatingQuarter>(RatingQuarter.Q1);
   const [year, setYear] = useState<number>(currentYear);
   const [referableLeads, setReferableLeads] = useState<ReferableTeamLead[]>([]);
+  const [memberStages, setMemberStages] = useState<MemberStageInfo[]>([]);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -1004,6 +1094,33 @@ export default function ApproveRatings() {
     };
   }, [token, user]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.teamId || user.role === "User") {
+      setMemberStages([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    listMemberStages({ teamId: user.teamId, quarter, year })
+      .then((data) => {
+        if (!cancelled) {
+          setMemberStages(data);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMemberStages([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.teamId, user?.role, quarter, year]);
+
   const { data: members } = useListUsers(
     user?.teamId ? { teamId: user.teamId } : undefined,
     { query: { enabled: !!user?.teamId } }
@@ -1027,6 +1144,7 @@ export default function ApproveRatings() {
   };
 
   const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+  const stageByUserId = new Map(memberStages.map((entry) => [entry.userId, entry]));
 
   if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
 
@@ -1101,6 +1219,7 @@ export default function ApproveRatings() {
                 year={year}
                 currentUser={user}
                 referableLeads={referableLeads}
+                stageInfo={stageByUserId.get(m.userId)}
               />
             ))
           )}

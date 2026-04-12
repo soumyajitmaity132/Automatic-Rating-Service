@@ -121,6 +121,16 @@ export default function SubmitRating() {
   const [isCycleOpen, setIsCycleOpen] = useState<boolean>(false);
   const [isCycleLoading, setIsCycleLoading] = useState(false);
   const [cycleWarningOpen, setCycleWarningOpen] = useState(false);
+  const [leadFeedbackRows, setLeadFeedbackRows] = useState<Array<{
+    approvalId: number;
+    itemId: number;
+    itemName?: string | null;
+    projectName?: string | null;
+    selfRatingValue?: number | null;
+    tlRatingValue?: number | null;
+    leadComment?: string | null;
+    tlLgtmStatus?: string | null;
+  }>>([]);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -204,6 +214,45 @@ export default function SubmitRating() {
   const { mutate: updateRating } = useUpdateRating();
   const { mutate: deleteRating } = useDeleteRating();
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.userId) {
+      setLeadFeedbackRows([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const params = new URLSearchParams({
+      ratedUserId: user.userId,
+      quarter,
+      year: String(year),
+    });
+
+    fetch(`/api/approvals?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("Failed to load lead feedback");
+        }
+        return response.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setLeadFeedbackRows(Array.isArray(data) ? data : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLeadFeedbackRows([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.userId, quarter, year]);
+
   const selectedPeriodRatings = ratings ?? [];
   const submittedPeriodRatings = selectedPeriodRatings.filter(
     (rating) => normalizeRatingStatus(rating.status) === "submitted"
@@ -219,6 +268,9 @@ export default function SubmitRating() {
   const editableItems = (items ?? []).filter((item) => !submittedItemIds.has(Number(item.itemId)));
   const hasSubmittedForSelectedPeriod = !!items?.length && editableItems.length === 0 && submittedPeriodRatings.length > 0;
   const isPeriodClosed = !isCycleOpen;
+  const submittedLeadFeedback = leadFeedbackRows.filter(
+    (row) => row.tlLgtmStatus === "Approved" && row.tlRatingValue !== null && row.tlRatingValue !== undefined
+  );
 
   useEffect(() => {
     if (!items) {
@@ -357,6 +409,65 @@ export default function SubmitRating() {
       averageRating: number;
       weightedContribution: number;
     } => entry != null);
+
+  const leadApprovedRowsByItem = submittedLeadFeedback.reduce<Record<number, Array<{ tlRatingValue: number }>>>((acc, row) => {
+    const itemId = Number(row.itemId);
+    if (!Number.isFinite(itemId) || row.tlRatingValue == null) {
+      return acc;
+    }
+    if (!acc[itemId]) {
+      acc[itemId] = [];
+    }
+    acc[itemId].push({ tlRatingValue: Number(row.tlRatingValue) });
+    return acc;
+  }, {});
+
+  const getAverageLeadRatingForItem = (itemId: number) => {
+    const itemRows = leadApprovedRowsByItem[itemId] ?? [];
+    const valid = itemRows
+      .map((row) => row.tlRatingValue)
+      .filter((value) => Number.isFinite(value) && value >= 0.1 && value <= 5.0);
+
+    if (valid.length === 0) {
+      return null;
+    }
+
+    return valid.reduce((sum, value) => sum + value, 0) / valid.length;
+  };
+
+  const leadWeightedRatingBreakdown = (items ?? [])
+    .map((item) => {
+      const itemWeight = Number(item.weight ?? 0);
+      if (!Number.isFinite(itemWeight) || itemWeight <= 0) {
+        return null;
+      }
+
+      const itemAverageRating = getAverageLeadRatingForItem(item.itemId);
+      if (itemAverageRating == null) {
+        return null;
+      }
+
+      return {
+        itemId: item.itemId,
+        itemName: item.itemName,
+        itemWeight,
+        averageRating: itemAverageRating,
+        weightedContribution: itemWeight * itemAverageRating,
+      };
+    })
+    .filter((entry): entry is {
+      itemId: number;
+      itemName: string;
+      itemWeight: number;
+      averageRating: number;
+      weightedContribution: number;
+    } => entry != null);
+
+  const leadTotalWeightedRating = leadWeightedRatingBreakdown.reduce(
+    (sum, entry) => sum + entry.weightedContribution,
+    0,
+  );
+  const hasLeadRatedItems = leadWeightedRatingBreakdown.length > 0;
 
   const hasAtLeastOneRatedItem = (items ?? []).some((item) => {
     const itemAverageRating = submittedItemIds.has(Number(item.itemId))
@@ -682,22 +793,72 @@ export default function SubmitRating() {
           </Card>
         )}
 
+        {submittedLeadFeedback.length > 0 && (
+          <Card className="p-4 bg-primary/5 border-primary/20">
+            <p className="text-sm font-semibold mb-3">Team Lead Feedback ({quarter} {year})</p>
+            <div className="space-y-2">
+              {submittedLeadFeedback.map((row) => (
+                <div key={row.approvalId} className="border rounded-lg p-3 bg-background/80">
+                  <div className="flex flex-wrap items-center gap-2 mb-1">
+                    <span className="font-medium">{row.itemName || "KPI Item"}</span>
+                    <span className="text-xs text-muted-foreground">•</span>
+                    <span className="text-sm text-muted-foreground">{row.projectName || "No project name"}</span>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Your Rating: <span className="font-medium text-foreground">{row.selfRatingValue != null ? Number(row.selfRatingValue).toFixed(1) : "—"}</span>
+                    {"  |  "}
+                    Lead Rating: <span className="font-medium text-foreground">{row.tlRatingValue != null ? Number(row.tlRatingValue).toFixed(1) : "—"}</span>
+                  </p>
+                  <p className="text-sm mt-1">
+                    <span className="font-medium">Lead Comment:</span> {row.leadComment?.trim() ? row.leadComment : "—"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
+
         {items && items.length > 0 && (
           <Card className="p-4 bg-secondary/30 border-border/60">
             <p className="text-sm text-muted-foreground">Total Weighted Rating ({quarter} {year})</p>
-            <p className="text-2xl font-semibold mt-1">
-              {hasAtLeastOneRatedItem ? totalWeightedRating.toFixed(2) : "0.00"}
-              <span className="text-sm font-normal text-muted-foreground ml-1">/ 5.00</span>
-            </p>
-            {weightedRatingBreakdown.length > 0 && (
-              <div className="mt-3 space-y-1.5">
-                {weightedRatingBreakdown.map((entry) => (
-                  <p key={entry.itemId} className="text-xs text-muted-foreground">
-                    {entry.itemName}: ({Math.round(entry.itemWeight * 100)}% × {entry.averageRating.toFixed(2)}) = {entry.weightedContribution.toFixed(2)}
-                  </p>
-                ))}
+
+            <div className="mt-2 grid md:grid-cols-2 gap-4">
+              <div className="rounded-lg border bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wide">Your Rating</p>
+                <p className="text-xl font-semibold mt-1">
+                  {hasAtLeastOneRatedItem ? totalWeightedRating.toFixed(2) : "0.00"}
+                  <span className="text-sm font-normal text-muted-foreground ml-1">/ 5.00</span>
+                </p>
+                {weightedRatingBreakdown.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {weightedRatingBreakdown.map((entry) => (
+                      <p key={`self-${entry.itemId}`} className="text-xs text-muted-foreground">
+                        {entry.itemName}: ({Math.round(entry.itemWeight * 100)}% × {entry.averageRating.toFixed(2)}) = {entry.weightedContribution.toFixed(2)}
+                      </p>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
+
+              <div className="rounded-lg border bg-background/70 p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wide">Lead Rating</p>
+                <p className="text-xl font-semibold mt-1">
+                  {hasLeadRatedItems ? leadTotalWeightedRating.toFixed(2) : "0.00"}
+                  <span className="text-sm font-normal text-muted-foreground ml-1">/ 5.00</span>
+                </p>
+                {leadWeightedRatingBreakdown.length > 0 ? (
+                  <div className="mt-2 space-y-1">
+                    {leadWeightedRatingBreakdown.map((entry) => (
+                      <p key={`lead-${entry.itemId}`} className="text-xs text-muted-foreground">
+                        {entry.itemName}: ({Math.round(entry.itemWeight * 100)}% × {entry.averageRating.toFixed(2)}) = {entry.weightedContribution.toFixed(2)}
+                      </p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-muted-foreground">Lead has not submitted ratings yet.</p>
+                )}
+              </div>
+            </div>
           </Card>
         )}
 
