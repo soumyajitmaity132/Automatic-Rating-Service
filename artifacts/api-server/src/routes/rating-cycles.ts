@@ -1,9 +1,10 @@
 import { Router } from "express";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { approvalsTable, ratingsTable, usersTable } from "@workspace/db/schema";
+import { approvalsTable, ratingsTable, usersTable, teamsTable } from "@workspace/db/schema";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
 import { getRatingCycleStatus, setRatingCycleStatus } from "../lib/rating-cycle.js";
+import { sendEmail } from "../lib/mailer.js";
 
 const router = Router();
 
@@ -217,9 +218,70 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
       autoSubmitSummary = await autoSubmitTeamRatingsToApprovals(teamId, quarter, year);
     }
 
+    let notificationSummary: {
+      attempted: number;
+      sent: number;
+      failed: number;
+    } | null = null;
+
+    // Send notification emails to all team members (Users only, not Team Leads)
+    try {
+      const teamMembers = await db
+        .select({ userId: usersTable.userId, displayName: usersTable.displayName, email: usersTable.email })
+        .from(usersTable)
+        .where(and(eq(usersTable.teamId, teamId), eq(usersTable.role, "User")));
+
+      notificationSummary = {
+        attempted: teamMembers.length,
+        sent: 0,
+        failed: 0,
+      };
+
+      if (teamMembers.length > 0) {
+        const [team] = await db
+          .select({ teamName: teamsTable.teamName })
+          .from(teamsTable)
+          .where(eq(teamsTable.teamId, teamId));
+
+        const teamName = team?.teamName ?? "Your Team";
+        const subject = isOpen
+          ? `Ratings are now open for ${quarter} ${year}`
+          : `Ratings have closed for ${quarter} ${year}`;
+
+        for (const member of teamMembers) {
+          const email = String(member.email ?? "").trim();
+          if (!email) {
+            notificationSummary.failed += 1;
+            req.log.warn({ userId: member.userId }, "Skipping cycle notification email: missing recipient email");
+            continue;
+          }
+
+          const emailBody = isOpen
+            ? `Dear ${member.displayName},\n\nRatings are now open for ${quarter} ${year} in the Employee Performance Portal.\n\nPlease log in and complete your self-ratings at your earliest convenience.\n\nTeam: ${teamName}\n\nRegards,\nEmployee Performance Team`
+            : `Dear ${member.displayName},\n\nRatings submission has closed for ${quarter} ${year}. All submitted ratings will now be processed for manager review.\n\nTeam: ${teamName}\n\nRegards,\nEmployee Performance Team`;
+
+          try {
+            await sendEmail({
+              to: email,
+              subject,
+              text: emailBody,
+            });
+            notificationSummary.sent += 1;
+          } catch (err) {
+            notificationSummary.failed += 1;
+            req.log.error({ userId: member.userId, email, err }, "Failed to send cycle notification email");
+          }
+        }
+      }
+    } catch (emailErr) {
+      req.log.error(emailErr, "Error sending cycle notification emails");
+      // Don't fail the request if email sending fails
+    }
+
     res.json({
       ...cycle,
       autoSubmitSummary,
+      notificationSummary,
     });
   } catch (err) {
     req.log.error(err, "Set rating cycle error");

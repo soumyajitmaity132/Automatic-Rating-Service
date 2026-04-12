@@ -24,5 +24,6 @@ router.use("/tl-drafts", tlDraftsRouter);
 router.use("/rating-cycles", ratingCyclesRouter);
 router.use("/disputes", disputesRouter);
 router.use("/send-reminder", reminderRouter);
+router.use("/reminder", reminderRouter);
 
 export default router;

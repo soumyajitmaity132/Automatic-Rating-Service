@@ -63,9 +63,15 @@ export default function ManageTeam() {
   const [reminderOpen, setReminderOpen] = useState(false);
   const [reminderDeadline, setReminderDeadline] = useState("");
   const [reminderMsg, setReminderMsg] = useState("");
+  const [pendingReminderMembers, setPendingReminderMembers] = useState<Array<{
+    userId: string;
+    displayName: string;
+    email: string;
+    level?: string;
+  }>>([]);
+  const [isLoadingPendingReminders, setIsLoadingPendingReminders] = useState(false);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [selectAll, setSelectAll] = useState(true);
-  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -140,36 +146,6 @@ export default function ManageTeam() {
     setCycleConfirmOpen(true);
   };
 
-  const handleSendTestEmail = async () => {
-    try {
-      setIsSendingTestEmail(true);
-      const response = await fetch("/api/auth/test-email", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(data?.message ?? data?.error ?? "Failed to send test email");
-      }
-
-      toast({
-        title: "Test email sent",
-        description: data?.message ?? "SMTP test email sent successfully.",
-      });
-    } catch (error) {
-      toast({
-        title: "Unable to send test email",
-        description: error instanceof Error ? error.message : "Please try again.",
-        variant: "destructive",
-      });
-    } finally {
-      setIsSendingTestEmail(false);
-    }
-  };
-
   const confirmCycleToggle = async () => {
     if (!user?.teamId || pendingCycleState === null) {
       setCycleConfirmOpen(false);
@@ -201,16 +177,28 @@ export default function ManageTeam() {
       setCycleConfirmOpen(false);
       setPendingCycleState(null);
 
+      const notificationSummary = data?.notificationSummary as
+        | { attempted: number; sent: number; failed: number }
+        | undefined;
+
       if (data.isOpen) {
-        toast({ title: `Ratings opened for ${cycleQ} ${cycleY}` });
+        toast({
+          title: `Ratings opened for ${cycleQ} ${cycleY}`,
+          description: notificationSummary
+            ? `Email sent: ${notificationSummary.sent}/${notificationSummary.attempted}${notificationSummary.failed ? ` (${notificationSummary.failed} failed)` : ""}`
+            : undefined,
+        });
       } else {
         const summary = data.autoSubmitSummary;
-        const detail = summary
+        const cycleDetail = summary
           ? `${summary.ratingsProcessed} ratings processed, ${summary.approvalsCreated} approvals created, ${summary.approvalsUpdated} approvals updated.`
           : "Team ratings were processed.";
+        const emailDetail = notificationSummary
+          ? ` Email sent: ${notificationSummary.sent}/${notificationSummary.attempted}${notificationSummary.failed ? ` (${notificationSummary.failed} failed)` : ""}.`
+          : "";
         toast({
           title: `Ratings closed for ${cycleQ} ${cycleY}`,
-          description: detail,
+          description: `${cycleDetail}${emailDetail}`,
         });
       }
     } catch (error) {
@@ -228,18 +216,52 @@ export default function ManageTeam() {
 
   const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
 
-  const openReminderModal = () => {
-    const ids = teamMembers.map(m => m.userId);
-    setSelectedUserIds(ids);
-    setSelectAll(true);
-    setReminderDeadline("");
-    setReminderMsg("");
-    setReminderOpen(true);
+  const openReminderModal = async () => {
+    if (!user?.teamId) return;
+
+    try {
+      setReminderOpen(true);
+      setIsLoadingPendingReminders(true);
+      setPendingReminderMembers([]);
+      setSelectedUserIds([]);
+      setSelectAll(false);
+      const params = new URLSearchParams({
+        teamId: String(user.teamId),
+        quarter: cycleQ,
+        year: String(cycleY),
+      });
+      const response = await fetch(`/api/reminder/pending-users?${params.toString()}`);
+      if (!response.ok) {
+        throw new Error("Failed to load pending users");
+      }
+
+      const pendingUsers = (await response.json()) as Array<{
+        userId: string;
+        displayName: string;
+        email: string;
+        level?: string;
+      }>;
+
+      const ids = pendingUsers.map((member) => member.userId);
+      setPendingReminderMembers(pendingUsers);
+      setSelectedUserIds(ids);
+      setSelectAll(ids.length > 0);
+      setReminderDeadline("");
+      setReminderMsg("");
+    } catch (error) {
+      toast({
+        title: "Unable to load pending users",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoadingPendingReminders(false);
+    }
   };
 
   const handleToggleSelectAll = (checked: boolean) => {
     setSelectAll(checked);
-    setSelectedUserIds(checked ? teamMembers.map(m => m.userId) : []);
+    setSelectedUserIds(checked ? pendingReminderMembers.map(m => m.userId) : []);
   };
 
   const handleToggleMember = (userId: string, checked: boolean) => {
@@ -252,29 +274,19 @@ export default function ManageTeam() {
   const handleSendReminder = async () => {
     if (!user?.teamId || selectedUserIds.length === 0) return;
     try {
-      if (selectedUserIds.length === teamMembers.length) {
-        const data = await sendReminderAsync({
-          data: {
-            teamId: user.teamId,
-            deadline: reminderDeadline || undefined,
-            customMessage: reminderMsg || undefined,
-          }
-        });
-        toast({ title: (data as any).message ?? "Reminders sent" });
-      } else {
-        await Promise.all(
-          selectedUserIds.map((selectedUserId) =>
-            sendReminderAsync({
-              data: {
-                userId: selectedUserId,
-                deadline: reminderDeadline || undefined,
-                customMessage: reminderMsg || undefined,
-              }
-            })
-          )
-        );
-        toast({ title: `Reminder sent to ${selectedUserIds.length} member(s)` });
-      }
+      await Promise.all(
+        selectedUserIds.map((selectedUserId) =>
+          sendReminderAsync({
+            data: {
+              userId: selectedUserId,
+              deadline: reminderDeadline || undefined,
+              customMessage: reminderMsg || undefined,
+            }
+          })
+        )
+      );
+
+      toast({ title: `Reminder sent to ${selectedUserIds.length} member(s)` });
       setReminderOpen(false);
     } catch {
       toast({ title: "Failed to send reminders", variant: "destructive" });
@@ -401,14 +413,6 @@ export default function ManageTeam() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <Button
-                variant="outline"
-                onClick={handleSendTestEmail}
-                disabled={isSendingTestEmail}
-                id="send-test-email-btn"
-              >
-                <Mail className="w-4 h-4 mr-1.5" /> {isSendingTestEmail ? "Sending..." : "Send Test Email"}
-              </Button>
               <Button
                 variant="outline"
                 onClick={openReminderModal}
@@ -706,20 +710,23 @@ export default function ManageTeam() {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-1">
+            <p className="text-xs text-muted-foreground">
+              Showing only users who have not submitted ratings for {cycleQ} {cycleY}.
+            </p>
             <div className="space-y-2">
               <Label className="text-sm font-semibold">Select Recipients</Label>
               <div className="border rounded-lg overflow-hidden">
                 <label className="flex items-center gap-3 px-3 py-2.5 bg-secondary/30 border-b cursor-pointer hover:bg-secondary/50 transition-colors">
                   <input
                     type="checkbox"
-                    checked={selectAll && selectedUserIds.length === teamMembers.length}
+                    checked={selectAll && selectedUserIds.length === pendingReminderMembers.length}
                     onChange={e => handleToggleSelectAll(e.target.checked)}
                     className="w-4 h-4 rounded accent-primary"
                   />
-                  <span className="text-sm font-medium">Select All ({teamMembers.length})</span>
+                  <span className="text-sm font-medium">Select All ({pendingReminderMembers.length})</span>
                 </label>
                 <div className="max-h-48 overflow-y-auto divide-y">
-                  {teamMembers.map(m => (
+                  {pendingReminderMembers.map(m => (
                     <label
                       key={m.userId}
                       className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-secondary/20 transition-colors"
@@ -736,8 +743,11 @@ export default function ManageTeam() {
                       </div>
                     </label>
                   ))}
-                  {teamMembers.length === 0 && (
-                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">No team members found</p>
+                  {isLoadingPendingReminders && (
+                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">Loading pending users...</p>
+                  )}
+                  {!isLoadingPendingReminders && pendingReminderMembers.length === 0 && (
+                    <p className="px-3 py-4 text-sm text-muted-foreground text-center">All users have already submitted ratings for this cycle.</p>
                   )}
                 </div>
               </div>

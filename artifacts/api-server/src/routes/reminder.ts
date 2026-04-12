@@ -1,11 +1,69 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { usersTable, teamsTable } from "@workspace/db/schema";
-import { eq } from "drizzle-orm";
+import { usersTable, teamsTable, ratingsTable } from "@workspace/db/schema";
+import { and, eq, isNull, or } from "drizzle-orm";
 import { authenticate, AuthRequest, requireRole } from "../middlewares/authenticate.js";
 import { sendEmail } from "../lib/mailer.js";
 
 const router = Router();
+
+router.get("/pending-users", authenticate, requireRole("Team Lead", "Manager"), async (req: AuthRequest, res) => {
+  try {
+    const currentUser = req.user!;
+    const requestedTeamId = Number.parseInt(String(req.query.teamId ?? ""), 10);
+    const quarter = String(req.query.quarter ?? "").trim();
+    const year = Number.parseInt(String(req.query.year ?? ""), 10);
+
+    let teamId = requestedTeamId;
+    if (Number.isNaN(teamId)) {
+      teamId = currentUser.teamId ?? Number.NaN;
+    }
+
+    if (Number.isNaN(teamId) || !quarter || Number.isNaN(year)) {
+      res.status(400).json({ error: "teamId, quarter and year are required" });
+      return;
+    }
+
+    if (currentUser.role === "Team Lead" && currentUser.teamId && teamId !== currentUser.teamId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const members = await db
+      .select({
+        userId: usersTable.userId,
+        displayName: usersTable.displayName,
+        email: usersTable.email,
+        level: usersTable.level,
+      })
+      .from(usersTable)
+      .where(and(eq(usersTable.teamId, teamId), eq(usersTable.role, "User")));
+
+    if (members.length === 0) {
+      res.json([]);
+      return;
+    }
+
+    const submittedRows = await db
+      .select({ userId: ratingsTable.userId })
+      .from(ratingsTable)
+      .where(
+        and(
+          eq(ratingsTable.quarter, quarter),
+          eq(ratingsTable.year, year),
+          or(eq(ratingsTable.status, "submitted"), isNull(ratingsTable.status)),
+        ),
+      );
+
+    const submittedUserIds = new Set(submittedRows.map((row) => row.userId));
+    const pendingMembers = members.filter((member) => !submittedUserIds.has(member.userId));
+
+    res.json(pendingMembers);
+  } catch (err) {
+    req.log.error(err, "List pending reminder users error");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 
 router.post("/", authenticate, requireRole("Team Lead", "Manager"), async (req: AuthRequest, res) => {
   try {
