@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@/lib/auth";
 import { Layout } from "@/components/layout";
 import {
@@ -33,13 +33,14 @@ const CATEGORIES = [
 
 const LEVELS = ["L1", "L2", "L3"] as const;
 type ItemLevel = (typeof LEVELS)[number];
+type LevelFilter = ItemLevel | "ALL";
 
 interface ItemFormData {
   itemName: string;
   description: string;
   weight: string;
   category: string;
-  level: ItemLevel;
+  level: LevelFilter;
 }
 
 const emptyForm: ItemFormData = {
@@ -51,7 +52,7 @@ const emptyForm: ItemFormData = {
 };
 
 function ItemFormDialog({
-  open, onClose, onSave, initial, isPending, title
+  open, onClose, onSave, initial, isPending, title, allowAllLevels
 }: {
   open: boolean;
   onClose: () => void;
@@ -59,6 +60,7 @@ function ItemFormDialog({
   initial: ItemFormData;
   isPending: boolean;
   title: string;
+  allowAllLevels?: boolean;
 }) {
   const [form, setForm] = useState<ItemFormData>(initial);
   useEffect(() => { setForm(initial); }, [initial]);
@@ -134,9 +136,10 @@ function ItemFormDialog({
 
             <div className="space-y-1">
               <Label>Level <span className="text-destructive">*</span></Label>
-              <Select value={form.level} onValueChange={v => set("level", v as ItemLevel)}>
+              <Select value={form.level} onValueChange={v => set("level", v as LevelFilter)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
+                  {allowAllLevels && <SelectItem value="ALL">All Levels</SelectItem>}
                   {LEVELS.map(level => <SelectItem key={level} value={level}>{level}</SelectItem>)}
                 </SelectContent>
               </Select>
@@ -168,10 +171,10 @@ export default function ManageKPIs() {
   const targetRole = isManager ? "Team Lead" : "User";
 
   const [addOpen, setAddOpen] = useState(false);
-  const [editItem, setEditItem] = useState<RatingItem | null>(null);
-  const [deleteItemId, setDeleteItemId] = useState<number | null>(null);
+  const [editItem, setEditItem] = useState<(RatingItem & { allItemIds?: number[] }) | null>(null);
+  const [deleteItemIds, setDeleteItemIds] = useState<number[] | null>(null);
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
-  const [selectedLevel, setSelectedLevel] = useState<ItemLevel>("L1");
+  const [selectedLevel, setSelectedLevel] = useState<LevelFilter>("L1");
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -182,8 +185,14 @@ export default function ManageKPIs() {
 
   const activeTeamId = isManager ? selectedTeamId : (user?.teamId ?? null);
 
+  const itemsQueryParams = {
+    ...(activeTeamId ? { teamId: activeTeamId } : {}),
+    targetRole,
+    ...(selectedLevel !== "ALL" ? { level: selectedLevel } : {}),
+  } as any;
+
   const { data: items, isLoading: itemsLoading } = useListItems(
-    activeTeamId ? { teamId: activeTeamId, targetRole, level: selectedLevel } : { targetRole, level: selectedLevel },
+    itemsQueryParams,
     { query: { enabled: !!user } }
   );
 
@@ -191,7 +200,50 @@ export default function ManageKPIs() {
   const { mutate: updateItem, isPending: isUpdating } = useUpdateItem();
   const { mutate: deleteItem, isPending: isDeleting } = useDeleteItem();
 
-  const totalWeight = (items ?? []).reduce((sum, i) => sum + (i.weight ?? 0), 0);
+  const displayItems = useMemo(() => {
+    const source: any[] = items ?? [];
+    if (selectedLevel !== "ALL") {
+      return source.map((item: any) => ({
+        ...item,
+        levelLabel: item.level,
+      }));
+    }
+
+    const grouped = new Map<string, any>();
+    for (const item of source) {
+      const key = `${item.itemName ?? ""}::${item.description ?? ""}::${item.category ?? ""}::${item.weight ?? 0}`;
+      const existing = grouped.get(key);
+
+      if (!existing) {
+        grouped.set(key, {
+          ...item,
+          groupKey: key,
+          levels: new Set([item.level ?? ""]),
+          allItemIds: [item.itemId],
+          levelItemIds: item.level ? { [item.level]: [item.itemId] } : {},
+        });
+      } else {
+        if (item.level) existing.levels.add(item.level);
+        existing.allItemIds.push(item.itemId);
+        if (item.level) {
+          if (!existing.levelItemIds[item.level]) {
+            existing.levelItemIds[item.level] = [];
+          }
+          existing.levelItemIds[item.level].push(item.itemId);
+        }
+      }
+    }
+
+    return Array.from(grouped.values()).map((entry: any) => {
+      const levels = Array.from(entry.levels as Set<string>).filter(Boolean).sort();
+      return {
+        ...entry,
+        levelLabel: levels.join("/") || "-",
+      };
+    });
+  }, [items, selectedLevel]);
+
+  const totalWeight = displayItems.reduce((sum: number, i: any) => sum + (i.weight ?? 0), 0);
   const totalPct = Math.round(totalWeight * 100);
   const weightOk = Math.abs(totalWeight - 1) < 0.005;
 
@@ -202,6 +254,42 @@ export default function ManageKPIs() {
       toast({ title: "Select a team first", variant: "destructive" });
       return;
     }
+
+    if (form.level === "ALL") {
+      const payloadBase = {
+        itemName: form.itemName.trim(),
+        description: form.description.trim() || undefined,
+        teamId: resolvedTeamId,
+        weight: parseFloat(form.weight),
+        category: form.category,
+        targetRole,
+      };
+
+      Promise.all(
+        LEVELS.map((level) =>
+          fetch("/api/items", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...payloadBase, level }),
+          }).then(async (response) => {
+            if (!response.ok) {
+              const errorBody = await response.json().catch(() => null);
+              throw new Error(errorBody?.error ?? `Failed for ${level}`);
+            }
+          })
+        )
+      )
+        .then(() => {
+          toast({ title: "KPI item added for all levels (L1/L2/L3)" });
+          setAddOpen(false);
+          queryClient.invalidateQueries({ queryKey: ["/api/items"] });
+        })
+        .catch((err: any) => {
+          toast({ title: "Failed to add item for all levels", description: err?.message, variant: "destructive" });
+        });
+      return;
+    }
+
     createItem({
       data: {
         itemName: form.itemName.trim(),
@@ -224,6 +312,72 @@ export default function ManageKPIs() {
 
   const handleUpdate = (form: ItemFormData) => {
     if (!editItem) return;
+
+    if (form.level === "ALL" && editItem.allItemIds && editItem.allItemIds.length > 0) {
+      Promise.all(
+        editItem.allItemIds.map((itemId: number) =>
+          fetch(`/api/items/${itemId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              itemName: form.itemName.trim(),
+              description: form.description.trim() || undefined,
+              weight: parseFloat(form.weight),
+              category: form.category,
+            }),
+          }).then(async (response) => {
+            if (!response.ok) {
+              const errorBody = await response.json().catch(() => null);
+              throw new Error(errorBody?.error ?? `Failed to update item ${itemId}`);
+            }
+          })
+        )
+      )
+        .then(() => {
+          toast({ title: "KPI item updated for all levels" });
+          setEditItem(null);
+          queryClient.invalidateQueries({ queryKey: ["/api/items"] });
+        })
+        .catch((err: any) => {
+          toast({ title: "Failed to update item", description: err?.message, variant: "destructive" });
+        });
+      return;
+    }
+
+    if (selectedLevel === "ALL" && form.level !== "ALL" && (editItem as any).levelItemIds?.[form.level]?.length) {
+      const targetIds: number[] = (editItem as any).levelItemIds[form.level];
+
+      Promise.all(
+        targetIds.map((itemId: number) =>
+          fetch(`/api/items/${itemId}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              itemName: form.itemName.trim(),
+              description: form.description.trim() || undefined,
+              weight: parseFloat(form.weight),
+              category: form.category,
+              level: form.level,
+            }),
+          }).then(async (response) => {
+            if (!response.ok) {
+              const errorBody = await response.json().catch(() => null);
+              throw new Error(errorBody?.error ?? `Failed to update item ${itemId}`);
+            }
+          })
+        )
+      )
+        .then(() => {
+          toast({ title: `KPI item updated for ${form.level}` });
+          setEditItem(null);
+          queryClient.invalidateQueries({ queryKey: ["/api/items"] });
+        })
+        .catch((err: any) => {
+          toast({ title: "Failed to update item", description: err?.message, variant: "destructive" });
+        });
+      return;
+    }
+
     updateItem({
       itemId: editItem.itemId,
       data: {
@@ -244,11 +398,36 @@ export default function ManageKPIs() {
   };
 
   const handleDelete = () => {
-    if (!deleteItemId) return;
-    deleteItem({ itemId: deleteItemId }, {
+    if (!deleteItemIds || deleteItemIds.length === 0) return;
+
+    if (deleteItemIds.length > 1) {
+      Promise.all(
+        deleteItemIds.map((itemId: number) =>
+          fetch(`/api/items/${itemId}`, {
+            method: "DELETE",
+          }).then(async (response) => {
+            if (!response.ok) {
+              const errorBody = await response.json().catch(() => null);
+              throw new Error(errorBody?.error ?? `Failed to delete item ${itemId}`);
+            }
+          })
+        )
+      )
+        .then(() => {
+          toast({ title: "KPI item deleted for all levels" });
+          setDeleteItemIds(null);
+          queryClient.invalidateQueries({ queryKey: ["/api/items"] });
+        })
+        .catch((err: any) => {
+          toast({ title: "Failed to delete item", description: err?.message, variant: "destructive" });
+        });
+      return;
+    }
+
+    deleteItem({ itemId: deleteItemIds[0] }, {
       onSuccess: () => {
         toast({ title: "KPI item deleted" });
-        setDeleteItemId(null);
+        setDeleteItemIds(null);
         queryClient.invalidateQueries({ queryKey: ["/api/items"] });
       },
       onError: () => toast({ title: "Failed to delete item", variant: "destructive" })
@@ -287,17 +466,18 @@ export default function ManageKPIs() {
                   <SelectValue placeholder="Select a team" />
                 </SelectTrigger>
                 <SelectContent>
-                  {teams.map(t => (
+                  {teams.map((t: any) => (
                     <SelectItem key={t.teamId} value={t.teamId.toString()}>{t.teamName}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             )}
-            <Select value={selectedLevel} onValueChange={v => setSelectedLevel(v as ItemLevel)}>
+            <Select value={selectedLevel} onValueChange={v => setSelectedLevel(v as LevelFilter)}>
               <SelectTrigger className="w-[120px]">
                 <SelectValue placeholder="Select level" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="ALL">All Levels</SelectItem>
                 {LEVELS.map(level => (
                   <SelectItem key={level} value={level}>{level}</SelectItem>
                 ))}
@@ -317,7 +497,7 @@ export default function ManageKPIs() {
         )}
 
         {/* Weight Summary Banner */}
-        {(!isManager || selectedTeamId) && items && items.length > 0 && (
+        {(!isManager || selectedTeamId) && displayItems.length > 0 && (
           <div className={`flex items-center gap-3 p-4 rounded-xl border text-sm font-medium ${
             weightOk
               ? "bg-emerald-50 dark:bg-emerald-900/10 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300"
@@ -333,6 +513,9 @@ export default function ManageKPIs() {
                 <span className="ml-2">— KPI weights should sum to 100%. Currently {totalPct > 100 ? "over" : "under"} by {Math.abs(100 - totalPct)}%.</span>
               )}
               {weightOk && <span className="ml-2">— Weights are correctly balanced.</span>}
+              {selectedLevel === "ALL" && (
+                <span className="ml-2">(deduplicated across levels)</span>
+              )}
             </div>
           </div>
         )}
@@ -341,14 +524,14 @@ export default function ManageKPIs() {
         {(!isManager || selectedTeamId) && <div className="space-y-3">
           {itemsLoading ? (
             <Card className="p-10 text-center text-muted-foreground">Loading items...</Card>
-          ) : !items || items.length === 0 ? (
+          ) : displayItems.length === 0 ? (
             <Card className="p-10 text-center border-dashed text-muted-foreground">
               <ClipboardList className="w-8 h-8 mx-auto mb-2 opacity-40" />
-              <p>No KPI items yet. Add your first item to get started.</p>
+              <p>No KPI items yet for {selectedLevel === "ALL" ? "all levels" : selectedLevel}. Add your first item to get started.</p>
             </Card>
           ) : (
-            items.map(item => (
-              <Card key={item.itemId} className="p-4">
+            displayItems.map((item: any) => (
+              <Card key={item.groupKey ?? item.itemId} className="p-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -356,9 +539,9 @@ export default function ManageKPIs() {
                       <span className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full">
                         {((item.weight ?? 0) * 100).toFixed(0)}%
                       </span>
-                      {!!item.level && (
+                      {!!item.levelLabel && (
                         <span className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300 px-2 py-0.5 rounded-full">
-                          {item.level}
+                          {item.levelLabel}
                         </span>
                       )}
                       {item.category && (
@@ -383,7 +566,7 @@ export default function ManageKPIs() {
                       size="sm"
                       variant="ghost"
                       className="text-destructive hover:bg-destructive/10"
-                      onClick={() => setDeleteItemId(item.itemId)}
+                      onClick={() => setDeleteItemIds(item.allItemIds && item.allItemIds.length > 0 ? item.allItemIds : [item.itemId])}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -403,6 +586,7 @@ export default function ManageKPIs() {
         initial={{ ...emptyForm, level: selectedLevel }}
         isPending={isCreating}
         title="Add KPI Item"
+        allowAllLevels
       />
 
       {/* Edit Dialog */}
@@ -415,19 +599,22 @@ export default function ManageKPIs() {
           description: editItem.description ?? "",
           weight: editItem.weight?.toString() ?? "",
           category: editItem.category ?? CATEGORIES[0],
-          level: (editItem.level as ItemLevel | undefined) ?? selectedLevel,
-        } : { ...emptyForm, level: selectedLevel }}
+          level: selectedLevel === "ALL" ? "ALL" : ((editItem.level as ItemLevel | undefined) ?? "L1"),
+        } : { ...emptyForm, level: selectedLevel === "ALL" ? "L1" : selectedLevel }}
         isPending={isUpdating}
         title="Edit KPI Item"
+        allowAllLevels={selectedLevel === "ALL"}
       />
 
       {/* Delete Confirmation */}
-      <AlertDialog open={!!deleteItemId} onOpenChange={v => { if (!v) setDeleteItemId(null); }}>
+      <AlertDialog open={!!deleteItemIds && deleteItemIds.length > 0} onOpenChange={v => { if (!v) setDeleteItemIds(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete KPI Item</AlertDialogTitle>
             <AlertDialogDescription>
-              This will permanently remove this rating item. Existing ratings linked to it will not be deleted but will no longer show the item name.
+              {deleteItemIds && deleteItemIds.length > 1
+                ? "This will permanently remove this KPI item across all levels (L1/L2/L3). Existing ratings linked to it will not be deleted but will no longer show the item name."
+                : "This will permanently remove this rating item. Existing ratings linked to it will not be deleted but will no longer show the item name."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
