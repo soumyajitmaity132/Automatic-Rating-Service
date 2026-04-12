@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { Layout } from "@/components/layout";
 import {
@@ -28,6 +28,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -92,6 +93,10 @@ function normalizeRatingStatus(status: unknown): "saved" | "pending" | "submitte
   return "submitted";
 }
 
+function getDisputeRowKey(itemId: number, projectName?: string | null): string {
+  return `${itemId}::${(projectName ?? "").trim().toLowerCase()}`;
+}
+
 function MandatoryAsterisk() {
   return (
     <Tooltip>
@@ -131,6 +136,24 @@ export default function SubmitRating() {
     leadComment?: string | null;
     tlLgtmStatus?: string | null;
   }>>([]);
+  const [sentDraftFeedbackRows, setSentDraftFeedbackRows] = useState<Array<{
+    draftId: number;
+    itemId: number;
+    itemName?: string | null;
+    projectName?: string | null;
+    ratingValue?: number | null;
+    leadComment?: string | null;
+    status?: string | null;
+    userDisputeMessage?: string | null;
+  }>>([]);
+  const [disputeDialogOpen, setDisputeDialogOpen] = useState(false);
+  const [selectedDraftForDispute, setSelectedDraftForDispute] = useState<{
+    draftId: number;
+    itemName?: string | null;
+    projectName?: string | null;
+  } | null>(null);
+  const [disputeMessage, setDisputeMessage] = useState("");
+  const [isSavingDispute, setIsSavingDispute] = useState(false);
 
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
@@ -253,6 +276,44 @@ export default function SubmitRating() {
     };
   }, [user?.userId, quarter, year]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!user?.userId) {
+      setSentDraftFeedbackRows([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const params = new URLSearchParams({
+      quarter,
+      year: String(year),
+    });
+
+    fetch(`/api/tl-drafts/sent-feedback?${params.toString()}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("Failed to load sent lead drafts");
+        }
+        return response.json();
+      })
+      .then((data) => {
+        if (!cancelled) {
+          setSentDraftFeedbackRows(Array.isArray(data) ? data : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSentDraftFeedbackRows([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.userId, quarter, year]);
+
   const selectedPeriodRatings = ratings ?? [];
   const submittedPeriodRatings = selectedPeriodRatings.filter(
     (rating) => normalizeRatingStatus(rating.status) === "submitted"
@@ -271,6 +332,79 @@ export default function SubmitRating() {
   const submittedLeadFeedback = leadFeedbackRows.filter(
     (row) => row.tlLgtmStatus === "Approved" && row.tlRatingValue !== null && row.tlRatingValue !== undefined
   );
+  const sentLeadFeedback = sentDraftFeedbackRows.filter(
+    (row) => (row.status === "send_to_user" || row.status === "dispute raised" || row.status === "dispute fixed") && row.ratingValue !== null && row.ratingValue !== undefined
+  );
+  const effectiveLeadFeedback = sentLeadFeedback.length > 0
+    ? sentLeadFeedback.map((row) => ({
+        approvalId: row.draftId,
+        draftId: row.draftId,
+        itemId: row.itemId,
+        itemName: row.itemName ?? null,
+        projectName: row.projectName ?? null,
+        selfRatingValue: null,
+        tlRatingValue: row.ratingValue ?? null,
+        leadComment: row.leadComment ?? null,
+        status: row.status ?? null,
+        userDisputeMessage: row.userDisputeMessage ?? null,
+      }))
+    : submittedLeadFeedback.map((row) => ({ ...row, draftId: null, status: null, userDisputeMessage: null }));
+
+  const openDisputeDialog = (row: {
+    draftId: number;
+    itemName?: string | null;
+    projectName?: string | null;
+    userDisputeMessage?: string | null;
+  }) => {
+    setSelectedDraftForDispute({
+      draftId: row.draftId,
+      itemName: row.itemName,
+      projectName: row.projectName,
+    });
+    setDisputeMessage(row.userDisputeMessage ?? "");
+    setDisputeDialogOpen(true);
+  };
+
+  const handleRaiseDispute = async () => {
+    if (!selectedDraftForDispute?.draftId) return;
+    const message = disputeMessage.trim();
+    if (!message) {
+      toast({ title: "Concern message is required", variant: "destructive" });
+      return;
+    }
+
+    try {
+      setIsSavingDispute(true);
+      const response = await fetch("/api/tl-drafts/raise-dispute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftId: selectedDraftForDispute.draftId, message }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => null);
+        throw new Error(errorBody?.error ?? "Failed to raise dispute");
+      }
+
+      toast({ title: "Dispute raised" });
+      setDisputeDialogOpen(false);
+
+      const params = new URLSearchParams({ quarter, year: String(year) });
+      const refreshed = await fetch(`/api/tl-drafts/sent-feedback?${params.toString()}`);
+      if (refreshed.ok) {
+        const data = await refreshed.json();
+        setSentDraftFeedbackRows(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      toast({
+        title: "Unable to raise dispute",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSavingDispute(false);
+    }
+  };
 
   useEffect(() => {
     if (!items) {
@@ -410,7 +544,7 @@ export default function SubmitRating() {
       weightedContribution: number;
     } => entry != null);
 
-  const leadApprovedRowsByItem = submittedLeadFeedback.reduce<Record<number, Array<{ tlRatingValue: number }>>>((acc, row) => {
+  const leadApprovedRowsByItem = effectiveLeadFeedback.reduce<Record<number, Array<{ tlRatingValue: number }>>>((acc, row) => {
     const itemId = Number(row.itemId);
     if (!Number.isFinite(itemId) || row.tlRatingValue == null) {
       return acc;
@@ -468,6 +602,16 @@ export default function SubmitRating() {
     0,
   );
   const hasLeadRatedItems = leadWeightedRatingBreakdown.length > 0;
+
+  const disputedRowKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const row of sentDraftFeedbackRows) {
+      if (row.status === "dispute raised") {
+        keys.add(getDisputeRowKey(Number(row.itemId), row.projectName));
+      }
+    }
+    return keys;
+  }, [sentDraftFeedbackRows]);
 
   const hasAtLeastOneRatedItem = (items ?? []).some((item) => {
     const itemAverageRating = submittedItemIds.has(Number(item.itemId))
@@ -793,16 +937,26 @@ export default function SubmitRating() {
           </Card>
         )}
 
-        {submittedLeadFeedback.length > 0 && (
+        {effectiveLeadFeedback.length > 0 && (
           <Card className="p-4 bg-primary/5 border-primary/20">
             <p className="text-sm font-semibold mb-3">Team Lead Feedback ({quarter} {year})</p>
             <div className="space-y-2">
-              {submittedLeadFeedback.map((row) => (
+              {effectiveLeadFeedback.map((row) => (
                 <div key={row.approvalId} className="border rounded-lg p-3 bg-background/80">
                   <div className="flex flex-wrap items-center gap-2 mb-1">
                     <span className="font-medium">{row.itemName || "KPI Item"}</span>
                     <span className="text-xs text-muted-foreground">•</span>
                     <span className="text-sm text-muted-foreground">{row.projectName || "No project name"}</span>
+                    {row.status === "dispute raised" && (
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300">
+                        Dispute Raised
+                      </span>
+                    )}
+                     {row.status === "dispute fixed" && (
+                       <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300">
+                         Dispute Fixed
+                       </span>
+                     )}
                   </div>
                   <p className="text-sm text-muted-foreground">
                     Your Rating: <span className="font-medium text-foreground">{row.selfRatingValue != null ? Number(row.selfRatingValue).toFixed(1) : "—"}</span>
@@ -812,6 +966,33 @@ export default function SubmitRating() {
                   <p className="text-sm mt-1">
                     <span className="font-medium">Lead Comment:</span> {row.leadComment?.trim() ? row.leadComment : "—"}
                   </p>
+                   {(row.status === "dispute raised" || row.status === "dispute fixed") && row.userDisputeMessage?.trim() && (
+                    <p className="text-sm mt-1">
+                      <span className="font-medium">Your Concern:</span> {row.userDisputeMessage}
+                    </p>
+                  )}
+                 {row.status === "dispute fixed" && (
+                   <p className="text-sm mt-1 font-medium text-emerald-600 dark:text-emerald-400">
+                     ✓ Lead has reviewed and fixed this dispute.
+                   </p>
+                 )}
+                  {row.draftId && (
+                    <div className="mt-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => openDisputeDialog({
+                          draftId: Number(row.draftId),
+                          itemName: row.itemName,
+                          projectName: row.projectName,
+                          userDisputeMessage: row.userDisputeMessage,
+                        })}
+                       disabled={row.status === "dispute raised" || row.status === "dispute fixed"}
+                      >
+                         {row.status === "dispute raised" ? "Dispute Raised" : row.status === "dispute fixed" ? "Dispute Fixed" : "Raise Dispute"}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -947,6 +1128,9 @@ export default function SubmitRating() {
                       {projects.map((project) => {
                         const numericValue = parseFloat(project.ratingValue);
                         const label = !Number.isNaN(numericValue) && numericValue > 0 ? ratingLabel(numericValue) : null;
+                        const isDisputeRaisedForProject = disputedRowKeys.has(
+                          getDisputeRowKey(item.itemId, project.projectName),
+                        );
 
                         return (
                           <div key={project.id} className="grid md:grid-cols-4 gap-4 p-4 border rounded-xl bg-muted/20 relative group">
@@ -965,6 +1149,11 @@ export default function SubmitRating() {
                             <div className="space-y-2 col-span-1 md:col-span-1 border-r pr-4 border-border/50">
                               <Label className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
                                 <Tag className="w-3.5 h-3.5" /> Project Entry <MandatoryAsterisk />
+                                {isDisputeRaisedForProject && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300 normal-case tracking-normal">
+                                    Dispute Raised
+                                  </span>
+                                )}
                               </Label>
                               <Input
                                 placeholder="Project name / Sub-task"
@@ -1061,6 +1250,34 @@ export default function SubmitRating() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <Dialog open={disputeDialogOpen} onOpenChange={setDisputeDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Raise Dispute</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {selectedDraftForDispute?.itemName || "KPI Item"} — {selectedDraftForDispute?.projectName || "No project name"}
+            </p>
+            <div className="space-y-1">
+              <Label>Your Concern</Label>
+              <Textarea
+                value={disputeMessage}
+                onChange={(e) => setDisputeMessage(e.target.value)}
+                placeholder="Write your concern for this item/project..."
+                className="min-h-[120px]"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDisputeDialogOpen(false)}>Cancel</Button>
+            <Button onClick={handleRaiseDispute} disabled={isSavingDispute || !disputeMessage.trim()}>
+              {isSavingDispute ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Layout>
   );
 }

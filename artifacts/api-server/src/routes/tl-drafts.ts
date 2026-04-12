@@ -55,12 +55,164 @@ async function enrichDrafts(drafts: any[]) {
 		teamLeadUserId: draft.teamLeadUserId,
 		teamLeadDisplayName: draft.teamLeadUserId ? leadMap.get(draft.teamLeadUserId) ?? null : null,
 		leadComment: draft.leadComment ?? null,
+		userDisputeMessage: draft.userDisputeMessage ?? null,
+		status: draft.status ?? "saved",
 		quarter: draft.quarter,
 		year: draft.year,
 		isActive: draft.isActive,
 		updatedOn: draft.updatedOn?.toISOString() ?? null,
 	}));
 }
+
+router.post("/raise-dispute", authenticate, async (req: AuthRequest, res) => {
+	try {
+		const currentUser = req.user!;
+		if (currentUser.role !== "User") {
+			res.status(403).json({ error: "Forbidden" });
+			return;
+		}
+
+		const draftId = Number.parseInt(String(req.body?.draftId ?? ""), 10);
+		const message = String(req.body?.message ?? "").trim();
+
+		if (Number.isNaN(draftId) || !message) {
+			res.status(400).json({ error: "draftId and message are required" });
+			return;
+		}
+
+		const [draft] = await db
+			.select()
+			.from(tlDraftTable)
+			.where(eq(tlDraftTable.draftId, draftId));
+
+		if (!draft) {
+			res.status(404).json({ error: "Draft not found" });
+			return;
+		}
+
+		if (draft.ratedUserId !== currentUser.userId) {
+			res.status(403).json({ error: "You can only raise disputes for your own feedback" });
+			return;
+		}
+
+		if (!draft.isActive) {
+			res.status(400).json({ error: "This draft is no longer active" });
+			return;
+		}
+
+		if (draft.status !== "send_to_user" && draft.status !== "dispute raised") {
+			res.status(400).json({ error: "Dispute can be raised only on sent feedback" });
+			return;
+		}
+
+		const [updated] = await db
+			.update(tlDraftTable)
+			.set({
+				status: "dispute raised",
+				userDisputeMessage: message,
+				updatedOn: new Date(),
+			})
+			.where(eq(tlDraftTable.draftId, draftId))
+			.returning();
+
+		res.json((await enrichDrafts([updated]))[0]);
+	} catch (err) {
+		req.log.error(err, "Raise user dispute error");
+		res.status(500).json({ error: "Internal Server Error" });
+	}
+});
+
+router.post("/fix-dispute", authenticate, async (req: AuthRequest, res) => {
+	try {
+		const currentUser = req.user!;
+		if (currentUser.role === "User") {
+			res.status(403).json({ error: "Forbidden" });
+			return;
+		}
+
+		const draftId = Number.parseInt(String(req.body?.draftId ?? ""), 10);
+		if (Number.isNaN(draftId)) {
+			res.status(400).json({ error: "draftId is required" });
+			return;
+		}
+
+		const [draft] = await db
+			.select()
+			.from(tlDraftTable)
+			.where(eq(tlDraftTable.draftId, draftId));
+
+		if (!draft) {
+			res.status(404).json({ error: "Draft not found" });
+			return;
+		}
+
+		if (!draft.isActive) {
+			res.status(400).json({ error: "This draft is no longer active" });
+			return;
+		}
+
+		if (draft.status !== "dispute raised") {
+			res.status(400).json({ error: "Only dispute raised drafts can be marked as fixed" });
+			return;
+		}
+
+		const [updated] = await db
+			.update(tlDraftTable)
+			.set({
+				status: "dispute fixed",
+				updatedOn: new Date(),
+			})
+			.where(eq(tlDraftTable.draftId, draftId))
+			.returning();
+
+		res.json((await enrichDrafts([updated]))[0]);
+	} catch (err) {
+		req.log.error(err, "Fix dispute error");
+		res.status(500).json({ error: "Internal Server Error" });
+	}
+});
+
+router.get("/sent-feedback", authenticate, async (req: AuthRequest, res) => {
+	try {
+		const currentUser = req.user!;
+		const quarter = String(req.query.quarter ?? "").trim();
+		const year = Number.parseInt(String(req.query.year ?? ""), 10);
+
+		if (!quarter || Number.isNaN(year)) {
+			res.status(400).json({ error: "quarter and year are required" });
+			return;
+		}
+
+		const conditions: any[] = [
+			eq(tlDraftTable.quarter, quarter),
+			eq(tlDraftTable.year, year),
+			eq(tlDraftTable.isActive, true),
+			inArray(tlDraftTable.status, ["send_to_user", "dispute raised", "dispute fixed"]),
+		];
+
+		if (currentUser.role === "User") {
+			conditions.push(eq(tlDraftTable.ratedUserId, currentUser.userId));
+		} else {
+			const ratedUserId = String(req.query.ratedUserId ?? "").trim();
+			if (!ratedUserId) {
+				res.status(400).json({ error: "ratedUserId is required" });
+				return;
+			}
+			conditions.push(eq(tlDraftTable.ratedUserId, ratedUserId));
+		}
+
+		const drafts = await db
+			.select()
+			.from(tlDraftTable)
+			.where(and(...conditions))
+			.orderBy(desc(tlDraftTable.updatedOn));
+
+		res.json(await enrichDrafts(drafts));
+	} catch (err) {
+		req.log.error(err, "List sent TL feedback error");
+		res.status(500).json({ error: "Internal Server Error" });
+	}
+});
 
 router.get("/", authenticate, async (req: AuthRequest, res) => {
 	try {
@@ -161,6 +313,7 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 				teamLeadUserId: currentUser.userId,
 				ratingValue: Number(ratingValue),
 				leadComment: typeof leadComment === "string" ? leadComment : null,
+				status: "saved",
 				quarter,
 				year: Number(year),
 				isActive: true,
@@ -171,6 +324,67 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 		res.status(201).json((await enrichDrafts([savedDraft]))[0]);
 	} catch (err) {
 		req.log.error(err, "Save TL draft error");
+		res.status(500).json({ error: "Internal Server Error" });
+	}
+});
+
+router.post("/send-to-user", authenticate, async (req: AuthRequest, res) => {
+	try {
+		const currentUser = req.user!;
+		if (currentUser.role === "User") {
+			res.status(403).json({ error: "Forbidden" });
+			return;
+		}
+
+		const ratedUserId = String(req.body?.ratedUserId ?? "").trim();
+		const quarter = String(req.body?.quarter ?? "").trim();
+		const year = Number.parseInt(String(req.body?.year ?? ""), 10);
+
+		if (!ratedUserId || !quarter || Number.isNaN(year)) {
+			res.status(400).json({ error: "ratedUserId, quarter and year are required" });
+			return;
+		}
+
+		if (currentUser.role === "Team Lead") {
+			const [ratedUser] = await db
+				.select({ teamId: usersTable.teamId })
+				.from(usersTable)
+				.where(eq(usersTable.userId, ratedUserId));
+
+			if (!ratedUser || ratedUser.teamId == null || currentUser.teamId !== ratedUser.teamId) {
+				res.status(403).json({ error: "Team Lead can only send drafts to own team members" });
+				return;
+			}
+		}
+
+		const activeSavedDrafts = await db
+			.select({ draftId: tlDraftTable.draftId })
+			.from(tlDraftTable)
+			.where(
+				and(
+					eq(tlDraftTable.ratedUserId, ratedUserId),
+					eq(tlDraftTable.quarter, quarter),
+					eq(tlDraftTable.year, year),
+					eq(tlDraftTable.isActive, true),
+					eq(tlDraftTable.status, "saved"),
+				),
+			);
+
+		if (activeSavedDrafts.length === 0) {
+			res.status(400).json({ error: "No saved drafts available to send" });
+			return;
+		}
+
+		for (const draft of activeSavedDrafts) {
+			await db
+				.update(tlDraftTable)
+				.set({ status: "send_to_user", updatedOn: new Date() })
+				.where(eq(tlDraftTable.draftId, draft.draftId));
+		}
+
+		res.json({ message: `Sent ${activeSavedDrafts.length} draft(s) to user`, count: activeSavedDrafts.length });
+	} catch (err) {
+		req.log.error(err, "Send drafts to user error");
 		res.status(500).json({ error: "Internal Server Error" });
 	}
 });

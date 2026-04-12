@@ -15,6 +15,8 @@ export const tlDraftTable = pgTable("tl_draft", {
   teamLeadUserId: text("team_lead_user_id")
     .references(() => usersTable.userId),
   leadComment: text("lead_comment"),
+  userDisputeMessage: text("user_dispute_message"),
+  status: text("status").notNull().default("saved"),
   quarter: text("quarter"),
   year: integer("year"),
   isActive: boolean("is_active").default(true),

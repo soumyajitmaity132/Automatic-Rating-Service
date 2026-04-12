@@ -43,6 +43,8 @@ interface TlDraft {
   leadComment?: string | null;
   quarter?: string | null;
   year?: number | null;
+  status?: "saved" | "send_to_user" | "dispute raised" | "dispute fixed" | string;
+  userDisputeMessage?: string | null;
   isActive: boolean;
   updatedOn?: string | null;
 }
@@ -150,6 +152,27 @@ async function saveTlDraft(payload: {
   if (!response.ok) {
     const errorBody = await response.json().catch(() => null);
     throw new Error(errorBody?.error ?? "Failed to save TL draft");
+  }
+
+  return response.json();
+}
+
+async function sendDraftsToUser(payload: {
+  ratedUserId: string;
+  quarter: RatingQuarter;
+  year: number;
+}): Promise<{ message: string; count: number }> {
+  const response = await fetch("/api/tl-drafts/send-to-user", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.json().catch(() => null);
+    throw new Error(errorBody?.error ?? "Failed to send drafts to user");
   }
 
   return response.json();
@@ -283,6 +306,10 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
   const [selectedReferLeadId, setSelectedReferLeadId] = useState<string>("");
   const [isReferring, setIsReferring] = useState(false);
   const [isSubmittingForUser, setIsSubmittingForUser] = useState(false);
+  const [isSendingToUser, setIsSendingToUser] = useState(false);
+  const [disputeViewOpen, setDisputeViewOpen] = useState(false);
+  const [selectedDisputeDraft, setSelectedDisputeDraft] = useState<TlDraft | null>(null);
+  const [isFixingDispute, setIsFixingDispute] = useState(false);
 
   const { data: ratings } = useListRatings(
     { userId: member.userId, quarter, year },
@@ -574,6 +601,11 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
     });
   }, [ratings, tlVals, leadComments, activeDraftByItem]);
 
+  const sendableDraftCount = useMemo(
+    () => (drafts ?? []).filter((draft) => draft.isActive && draft.status === "saved").length,
+    [drafts],
+  );
+
   const handleSaveAllDrafts = async () => {
     if (pendingDraftRows.length === 0) {
       toast({ title: "No changes to save", description: "Add or edit at least one rating row before saving." });
@@ -634,6 +666,29 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
     }
   };
 
+  const handleSendToUser = async () => {
+    try {
+      setIsSendingToUser(true);
+      const result = await sendDraftsToUser({
+        ratedUserId: member.userId,
+        quarter,
+        year,
+      });
+
+      const refreshedDrafts = await listTlDrafts({ ratedUserId: member.userId, quarter, year });
+      setDrafts(refreshedDrafts);
+      toast({ title: "Sent to user", description: result.message ?? `Sent ${result.count} draft(s).` });
+    } catch (error) {
+      toast({
+        title: "Unable to send to user",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSendingToUser(false);
+    }
+  };
+
   const handleViewHistory = async (rating: Rating) => {
     const label = `${rating.itemName ?? "Item"} — ${rating.projectName || rating.itemName || "No project name"}`;
     try {
@@ -657,6 +712,39 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
       setHistoryOpen(false);
     } finally {
       setHistoryLoading(false);
+    }
+  };
+
+  const openDisputeView = (draft: TlDraft) => {
+    setSelectedDisputeDraft(draft);
+    setDisputeViewOpen(true);
+  };
+
+  const handleFixDispute = async () => {
+    if (!selectedDisputeDraft?.draftId) return;
+    try {
+      setIsFixingDispute(true);
+      const response = await fetch("/api/tl-drafts/fix-dispute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ draftId: selectedDisputeDraft.draftId }),
+      });
+      if (!response.ok) {
+        const err = await response.json().catch(() => null);
+        throw new Error(err?.error ?? "Failed to mark dispute as fixed");
+      }
+      toast({ title: "Dispute marked as fixed" });
+      setDisputeViewOpen(false);
+      const refreshed = await listTlDrafts({ ratedUserId: member.userId, quarter, year });
+      setDrafts(refreshed);
+    } catch (error) {
+      toast({
+        title: "Unable to fix dispute",
+        description: error instanceof Error ? error.message : "Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsFixingDispute(false);
     }
   };
 
@@ -890,6 +978,18 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                                   <History className="w-3.5 h-3.5" />
                                   History
                                 </Button>
+                                {(activeDraft?.status === "dispute raised" || activeDraft?.status === "dispute fixed") && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className={activeDraft.status === "dispute fixed"
+                                      ? "gap-1.5 text-emerald-700 border-emerald-300 hover:bg-emerald-50 dark:text-emerald-300 dark:border-emerald-900/40 dark:hover:bg-emerald-900/20"
+                                      : "gap-1.5 text-rose-700 border-rose-200 hover:bg-rose-50 dark:text-rose-300 dark:border-rose-900/40 dark:hover:bg-rose-900/20"}
+                                    onClick={() => openDisputeView(activeDraft)}
+                                  >
+                                    {activeDraft.status === "dispute fixed" ? "Dispute Fixed" : "Dispute Raised"}
+                                  </Button>
+                                )}
                               </div>
                               {!isStage5 && activeDraft && (
                                 <p className="text-xs text-muted-foreground whitespace-pre-wrap">
@@ -916,12 +1016,24 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                         {isSavingAllDrafts ? "Saving..." : `Save all changes (${pendingDraftRows.length})`}
                       </Button>
                       <Button
+                        variant="secondary"
+                        onClick={handleSendToUser}
+                        disabled={isSendingToUser || sendableDraftCount === 0}
+                      >
+                        {isSendingToUser ? "Sending..." : `Send to ${member.displayName}`}
+                      </Button>
+                      <Button
                         onClick={handleSubmitForUser}
-                        disabled={alreadySubmittedForPeriod || isSubmittingForUser || (ratings ?? []).some((rating) => {
-                          const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
-                          const value = Number(activeDraftByItem.get(rowKey)?.ratingValue);
-                          return Number.isNaN(value) || value < 0.1 || value > 5.0;
-                        })}
+                        disabled={alreadySubmittedForPeriod || isSubmittingForUser ||
+                          drafts.some((d) => d.isActive && d.status === "dispute raised") ||
+                          (ratings ?? []).some((rating) => {
+                            const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
+                            const value = Number(activeDraftByItem.get(rowKey)?.ratingValue);
+                            return Number.isNaN(value) || value < 0.1 || value > 5.0;
+                          })}
+                        title={drafts.some((d) => d.isActive && d.status === "dispute raised")
+                          ? "Resolve all disputes before submitting"
+                          : undefined}
                       >
                         {isSubmittingForUser ? "Submitting..." : `Submit for ${member.displayName}`}
                       </Button>
@@ -1004,6 +1116,44 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setHistoryOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={disputeViewOpen} onOpenChange={setDisputeViewOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {selectedDisputeDraft?.status === "dispute fixed" ? "Dispute Fixed" : "Dispute Raised"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {selectedDisputeDraft?.itemName || "KPI Item"} — {selectedDisputeDraft?.projectName || "No project name"}
+            </p>
+            <div className="rounded-md border p-3 bg-muted/20">
+              <p className="text-sm font-medium mb-1">User Concern</p>
+              <p className="text-sm whitespace-pre-wrap">
+                {selectedDisputeDraft?.userDisputeMessage?.trim() || "No concern message provided."}
+              </p>
+            </div>
+            {selectedDisputeDraft?.status === "dispute fixed" && (
+              <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                ✓ This dispute has been marked as fixed.
+              </p>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDisputeViewOpen(false)}>Close</Button>
+            {selectedDisputeDraft?.status === "dispute raised" && (
+              <Button
+                onClick={handleFixDispute}
+                disabled={isFixingDispute}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                {isFixingDispute ? "Saving..." : "Dispute Fixed"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
