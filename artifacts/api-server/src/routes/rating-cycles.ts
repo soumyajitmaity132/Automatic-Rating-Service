@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { approvalsTable, ratingsTable, usersTable, teamsTable } from "@workspace/db/schema";
+import { approvalsTable, ratingsTable, usersTable, teamsTable, itemsToRateTable } from "@workspace/db/schema";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
 import { getRatingCycleStatus, setRatingCycleStatus } from "../lib/rating-cycle.js";
 import { sendEmail } from "../lib/mailer.js";
@@ -24,7 +24,109 @@ function approvalKey(entry: {
   return `${entry.itemId}::${entry.ratedUserId}::${entry.quarter ?? ""}::${entry.year ?? ""}::${entry.projectName ?? ""}`;
 }
 
-async function autoSubmitTeamRatingsToApprovals(teamId: number, quarter: string, year: number) {
+async function updateTotalWeightedRatingForUser(params: {
+  ratedUserId: string;
+  teamId: number;
+  quarter: string;
+  year: number;
+}) {
+  const allUserApprovals = await db
+    .select()
+    .from(approvalsTable)
+    .where(
+      and(
+        eq(approvalsTable.ratedUserId, params.ratedUserId),
+        eq(approvalsTable.teamId, params.teamId),
+        eq(approvalsTable.quarter, params.quarter),
+        eq(approvalsTable.year, params.year),
+      )
+    );
+
+  if (allUserApprovals.length === 0) {
+    return null;
+  }
+
+  const teamItems = await db
+    .select()
+    .from(itemsToRateTable)
+    .where(eq(itemsToRateTable.teamId, params.teamId));
+
+  const itemRatings: Record<number, number[]> = {};
+  for (const approval of allUserApprovals) {
+    const effectiveRating = approval.tlRatingValue ?? approval.selfRatingValue;
+    if (effectiveRating !== null && effectiveRating !== undefined) {
+      if (!itemRatings[approval.itemId]) itemRatings[approval.itemId] = [];
+      itemRatings[approval.itemId].push(Number(effectiveRating));
+    }
+  }
+
+  let weightedSum = 0;
+  let hasAny = false;
+  for (const item of teamItems) {
+    const weight = Number(item.weight ?? 0);
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    const values = itemRatings[item.itemId];
+    if (!values || values.length === 0) continue;
+    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+    weightedSum += weight * average;
+    hasAny = true;
+  }
+
+  const finalWeightedRating = hasAny ? weightedSum : null;
+
+  await db
+    .update(approvalsTable)
+    .set({ totalWeightedRating: finalWeightedRating })
+    .where(
+      and(
+        eq(approvalsTable.ratedUserId, params.ratedUserId),
+        eq(approvalsTable.teamId, params.teamId),
+        eq(approvalsTable.quarter, params.quarter),
+        eq(approvalsTable.year, params.year),
+      )
+    );
+
+  return finalWeightedRating;
+}
+
+async function getInvalidKpiWeightLevels(teamId: number): Promise<string[]> {
+  const rows = await db
+    .select({ level: itemsToRateTable.level, weight: itemsToRateTable.weight })
+    .from(itemsToRateTable)
+    .where(and(eq(itemsToRateTable.teamId, teamId), eq(itemsToRateTable.targetRole, "User")));
+
+  const totalsByLevel = new Map<string, number>([
+    ["L1", 0],
+    ["L2", 0],
+    ["L3", 0],
+  ]);
+
+  for (const row of rows) {
+    const level = String(row.level ?? "").toUpperCase();
+    if (!totalsByLevel.has(level)) {
+      continue;
+    }
+
+    const weight = Number(row.weight ?? 0);
+    if (Number.isFinite(weight)) {
+      totalsByLevel.set(level, (totalsByLevel.get(level) ?? 0) + weight);
+    }
+  }
+
+  const tolerance = 0.005;
+  const invalidLevels: string[] = [];
+
+  for (const level of ["L1", "L2", "L3"]) {
+    const total = totalsByLevel.get(level) ?? 0;
+    if (Math.abs(total - 1) > tolerance) {
+      invalidLevels.push(level);
+    }
+  }
+
+  return invalidLevels;
+}
+
+async function autoSubmitTeamRatingsToApprovals(teamId: number, quarter: string, year: number, submittedByUserId: string) {
   const teamUsers = await db
     .select({ userId: usersTable.userId })
     .from(usersTable)
@@ -94,6 +196,9 @@ async function autoSubmitTeamRatingsToApprovals(teamId: number, quarter: string,
           projectName: rating.projectName,
           quarter: rating.quarter,
           year: rating.year,
+          tlLgtmStatus: "Approved",
+          tlLgtmTimestamp: new Date(),
+          tlLgtmByUserId: submittedByUserId,
         })
         .where(eq(approvalsTable.approvalId, existing.approvalId));
       approvalsUpdated += 1;
@@ -107,7 +212,9 @@ async function autoSubmitTeamRatingsToApprovals(teamId: number, quarter: string,
           projectName: rating.projectName,
           selfRatingValue: rating.ratingValue,
           tlRatingValue: null,
-          tlLgtmStatus: "Pending",
+          tlLgtmStatus: "Approved",
+          tlLgtmTimestamp: new Date(),
+          tlLgtmByUserId: submittedByUserId,
           finalLgtmStatus: "Pending",
           disputeStatus: false,
           quarter: rating.quarter,
@@ -124,6 +231,15 @@ async function autoSubmitTeamRatingsToApprovals(teamId: number, quarter: string,
       .update(ratingsTable)
       .set({ status: "submitted" })
       .where(and(...updateConditions));
+  }
+
+  for (const userId of userIds) {
+    await updateTotalWeightedRatingForUser({
+      ratedUserId: userId,
+      teamId,
+      quarter,
+      year,
+    });
   }
 
   return {
@@ -206,6 +322,36 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
       }
     }
 
+    if (isOpen) {
+      const [existingApprovedSubmission] = await db
+        .select({ approvalId: approvalsTable.approvalId })
+        .from(approvalsTable)
+        .where(
+          and(
+            eq(approvalsTable.teamId, teamId),
+            eq(approvalsTable.quarter, quarter),
+            eq(approvalsTable.year, year),
+            eq(approvalsTable.tlLgtmStatus, "Approved"),
+          )
+        )
+        .limit(1);
+
+      if (existingApprovedSubmission) {
+        res.status(400).json({
+          error: `Ratings for ${quarter} ${year} have already been submitted for your team and cannot be reopened.`,
+        });
+        return;
+      }
+
+      const invalidLevels = await getInvalidKpiWeightLevels(teamId);
+      if (invalidLevels.length > 0) {
+        res.status(400).json({
+          error: `Manage your KPI weightage. Total KPI weight must be 100% for each level (L1/L2/L3). Please fix: ${invalidLevels.join(", ")}.`,
+        });
+        return;
+      }
+    }
+
     const cycle = await setRatingCycleStatus(teamId, quarter, year, isOpen, currentUser.userId);
 
     let autoSubmitSummary: {
@@ -215,7 +361,7 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
     } | null = null;
 
     if (!isOpen) {
-      autoSubmitSummary = await autoSubmitTeamRatingsToApprovals(teamId, quarter, year);
+      autoSubmitSummary = await autoSubmitTeamRatingsToApprovals(teamId, quarter, year, currentUser.userId);
     }
 
     let notificationSummary: {

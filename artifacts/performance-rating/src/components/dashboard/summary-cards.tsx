@@ -4,7 +4,7 @@ import { motion } from "framer-motion";
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip as RechartsTooltip } from "recharts";
 import { Award, Target, TrendingUp } from "lucide-react";
 
-export function SummaryCards({ summary }: { summary?: RatingSummary }) {
+export function SummaryCards({ summary, leadScore }: { summary?: RatingSummary; leadScore?: number | null }) {
   if (!summary) return null;
 
   const chartData = summary.categoryScores.map(cat => ({
@@ -21,7 +21,7 @@ export function SummaryCards({ summary }: { summary?: RatingSummary }) {
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mb-8">
       <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="lg:col-span-1">
         <Card className="p-6 h-full flex flex-col justify-center items-center text-center relative overflow-hidden group">
           <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent z-0" />
@@ -29,12 +29,30 @@ export function SummaryCards({ summary }: { summary?: RatingSummary }) {
             <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 text-primary">
               <Award className="w-8 h-8" />
             </div>
-            <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">Weighted Score</h3>
+            <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">User Score</h3>
             <div className="text-6xl font-display font-bold text-foreground mb-4">
               {summary.weightedScore.toFixed(2)}
             </div>
             <div className={`px-4 py-2 rounded-full border text-sm font-semibold ${getLabelColor(summary.weightedScore)}`}>
               {summary.performanceLabel}
+            </div>
+          </div>
+        </Card>
+      </motion.div>
+
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.05 }} className="lg:col-span-1">
+        <Card className="p-6 h-full flex flex-col justify-center items-center text-center relative overflow-hidden group">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-transparent z-0" />
+          <div className="relative z-10 flex flex-col items-center">
+            <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center mb-4 text-primary">
+              <TrendingUp className="w-8 h-8" />
+            </div>
+            <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">Lead Score</h3>
+            <div className="text-6xl font-display font-bold text-foreground mb-4">
+              {leadScore != null ? leadScore.toFixed(2) : "0.00"}
+            </div>
+            <div className={`px-4 py-2 rounded-full border text-sm font-semibold ${getLabelColor(leadScore ?? 0)}`}>
+              {leadScore != null ? "Lead Rating" : "Pending"}
             </div>
           </div>
         </Card>

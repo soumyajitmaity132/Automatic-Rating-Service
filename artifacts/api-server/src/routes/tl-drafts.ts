@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { db } from "@workspace/db";
-import { itemsToRateTable, tlDraftTable, usersTable } from "@workspace/db/schema";
+import { itemsToRateTable, ratingsTable, tlDraftTable, usersTable } from "@workspace/db/schema";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
+import { sendEmail } from "../lib/mailer.js";
 
 const router = Router();
 
@@ -136,6 +137,15 @@ router.post("/fix-dispute", authenticate, async (req: AuthRequest, res) => {
 			return;
 		}
 
+		const hasRatingValue = req.body?.ratingValue !== undefined && req.body?.ratingValue !== null && req.body?.ratingValue !== "";
+		const ratingValueNumber = hasRatingValue ? Number(req.body?.ratingValue) : null;
+		if (hasRatingValue && (Number.isNaN(ratingValueNumber as number) || (ratingValueNumber as number) < 0 || (ratingValueNumber as number) > 5)) {
+			res.status(400).json({ error: "ratingValue must be between 0 and 5" });
+			return;
+		}
+
+		const leadComment = typeof req.body?.leadComment === "string" ? req.body.leadComment : null;
+
 		const [draft] = await db
 			.select()
 			.from(tlDraftTable)
@@ -159,6 +169,8 @@ router.post("/fix-dispute", authenticate, async (req: AuthRequest, res) => {
 		const [updated] = await db
 			.update(tlDraftTable)
 			.set({
+				ratingValue: hasRatingValue ? (ratingValueNumber as number) : draft.ratingValue,
+				leadComment,
 				status: "dispute fixed",
 				updatedOn: new Date(),
 			})
@@ -283,6 +295,32 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 			return;
 		}
 
+		const ratingNumber = Number(ratingValue);
+		const leadCommentText = typeof leadComment === "string" ? leadComment.trim() : "";
+
+		const ratingConditions: any[] = [
+			eq(ratingsTable.itemId, Number(itemId)),
+			eq(ratingsTable.userId, ratedUserId),
+			eq(ratingsTable.quarter, quarter),
+			eq(ratingsTable.year, Number(year)),
+		];
+
+		if (projectName) {
+			ratingConditions.push(eq(ratingsTable.projectName, projectName));
+		} else {
+			ratingConditions.push(isNull(ratingsTable.projectName));
+		}
+
+		const [selfRatingRow] = await db
+			.select({ ratingValue: ratingsTable.ratingValue })
+			.from(ratingsTable)
+			.where(and(...ratingConditions));
+
+		if (selfRatingRow && Math.abs(Number(selfRatingRow.ratingValue) - ratingNumber) > 0.000001 && !leadCommentText) {
+			res.status(400).json({ error: "Referred Lead Comment is mandatory when Referred Lead Rating differs from User Rating" });
+			return;
+		}
+
 		const matchConditions: any[] = [
 			eq(tlDraftTable.itemId, Number(itemId)),
 			eq(tlDraftTable.ratedUserId, ratedUserId),
@@ -311,7 +349,7 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 				projectName,
 				ratedUserId,
 				teamLeadUserId: currentUser.userId,
-				ratingValue: Number(ratingValue),
+				ratingValue: ratingNumber,
 				leadComment: typeof leadComment === "string" ? leadComment : null,
 				status: "saved",
 				quarter,
@@ -358,7 +396,13 @@ router.post("/send-to-user", authenticate, async (req: AuthRequest, res) => {
 		}
 
 		const activeSavedDrafts = await db
-			.select({ draftId: tlDraftTable.draftId })
+			.select({
+				draftId: tlDraftTable.draftId,
+				itemId: tlDraftTable.itemId,
+				projectName: tlDraftTable.projectName,
+				ratingValue: tlDraftTable.ratingValue,
+				leadComment: tlDraftTable.leadComment,
+			})
 			.from(tlDraftTable)
 			.where(
 				and(
@@ -375,11 +419,78 @@ router.post("/send-to-user", authenticate, async (req: AuthRequest, res) => {
 			return;
 		}
 
+		const memberRatings = await db
+			.select({
+				itemId: ratingsTable.itemId,
+				projectName: ratingsTable.projectName,
+				ratingValue: ratingsTable.ratingValue,
+			})
+			.from(ratingsTable)
+			.where(
+				and(
+					eq(ratingsTable.userId, ratedUserId),
+					eq(ratingsTable.quarter, quarter),
+					eq(ratingsTable.year, year),
+				),
+			);
+
+		if (memberRatings.length === 0) {
+			res.status(400).json({ error: "No self-ratings found for this user in selected quarter/year" });
+			return;
+		}
+
+		const draftByKey = new Map(
+			activeSavedDrafts.map((draft) => [
+				`${draft.itemId}::${draft.projectName ?? ""}`,
+				draft,
+			]),
+		);
+
+		for (const rating of memberRatings) {
+			const key = `${rating.itemId}::${rating.projectName ?? ""}`;
+			const draft = draftByKey.get(key);
+			if (!draft) {
+				res.status(400).json({ error: "Team Lead must provide rating for all rows before sending" });
+				return;
+			}
+
+			const leadRating = Number(draft.ratingValue);
+			if (Number.isNaN(leadRating) || leadRating < 0 || leadRating > 5) {
+				res.status(400).json({ error: "Lead Rating must be between 0 and 5 for all rows" });
+				return;
+			}
+
+			const userRating = Number(rating.ratingValue);
+			const leadComment = String(draft.leadComment ?? "").trim();
+			if (!Number.isNaN(userRating) && Math.abs(leadRating - userRating) > 0.000001 && !leadComment) {
+				res.status(400).json({ error: "Lead Comment is mandatory wherever Lead Rating differs from User Rating" });
+				return;
+			}
+		}
+
 		for (const draft of activeSavedDrafts) {
 			await db
 				.update(tlDraftTable)
 				.set({ status: "send_to_user", updatedOn: new Date() })
 				.where(eq(tlDraftTable.draftId, draft.draftId));
+		}
+
+		try {
+			const [ratedUser] = await db
+				.select({ displayName: usersTable.displayName, email: usersTable.email })
+				.from(usersTable)
+				.where(eq(usersTable.userId, ratedUserId));
+
+			const recipientEmail = String(ratedUser?.email ?? "").trim();
+			if (recipientEmail) {
+				await sendEmail({
+					to: recipientEmail,
+					subject: `Rating feedback available for ${quarter} ${year}`,
+					text: `Hi ${ratedUser?.displayName ?? "Team Member"},\n\nYour Team Lead has provided ratings for ${quarter} ${year}.\nYou can now review the feedback and raise a dispute if needed.\n\nRegards,\nEmployee Performance Portal`,
+				});
+			}
+		} catch (emailErr) {
+			req.log.error(emailErr, "Failed to send send-to-user notification email");
 		}
 
 		res.json({ message: `Sent ${activeSavedDrafts.length} draft(s) to user`, count: activeSavedDrafts.length });

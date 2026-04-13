@@ -95,6 +95,8 @@ export default function ManageTeam() {
   const [isCycleUpdating, setIsCycleUpdating] = useState(false);
   const [cycleConfirmOpen, setCycleConfirmOpen] = useState(false);
   const [pendingCycleState, setPendingCycleState] = useState<boolean | null>(null);
+  const [kpiWeightWarningOpen, setKpiWeightWarningOpen] = useState(false);
+  const [kpiWeightWarningMessage, setKpiWeightWarningMessage] = useState("Manage your KPI weightage.");
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +143,98 @@ export default function ManageTeam() {
     };
   }, [user?.teamId, cycleQ, cycleY]);
 
-  const handleToggleCycle = (checked: boolean) => {
+  const validateKpiWeightageBeforeOpeningCycle = async (): Promise<{ valid: boolean; message?: string }> => {
+    if (!user?.teamId) {
+      return { valid: false, message: "Manage your KPI weightage." };
+    }
+
+    const response = await fetch(`/api/items?teamId=${user.teamId}&targetRole=User`);
+    if (!response.ok) {
+      throw new Error("Unable to validate KPI weightage. Please try again.");
+    }
+
+    const items = (await response.json()) as Array<{ level?: string | null; weight?: number | null }>;
+    const totals = new Map<string, number>([
+      ["L1", 0],
+      ["L2", 0],
+      ["L3", 0],
+    ]);
+
+    for (const item of items) {
+      const level = String(item.level ?? "").trim().toUpperCase();
+      if (!totals.has(level)) continue;
+      const weight = Number(item.weight ?? 0);
+      if (Number.isFinite(weight)) {
+        totals.set(level, (totals.get(level) ?? 0) + weight);
+      }
+    }
+
+    const invalidLevels = ["L1", "L2", "L3"].filter((level) => Math.abs((totals.get(level) ?? 0) - 1) > 0.005);
+
+    if (invalidLevels.length > 0) {
+      return {
+        valid: false,
+        message: `Manage your KPI weightage. Total KPI weight must be 100% for each level (L1/L2/L3). Please fix: ${invalidLevels.join(", ")}.`,
+      };
+    }
+
+    return { valid: true };
+  };
+
+  const validateNoApprovedSubmissionsBeforeOpeningCycle = async (): Promise<{ valid: boolean; message?: string }> => {
+    if (!user?.teamId) {
+      return { valid: false, message: "Ratings have already been submitted and cannot be reopened." };
+    }
+
+    const params = new URLSearchParams({
+      teamId: String(user.teamId),
+      quarter: cycleQ,
+      year: String(cycleY),
+    });
+    const response = await fetch(`/api/approvals?${params.toString()}`);
+    if (!response.ok) {
+      throw new Error("Unable to validate existing submissions. Please try again.");
+    }
+
+    const approvals = (await response.json()) as Array<{ tlLgtmStatus?: string | null }>;
+    const hasApprovedSubmission = approvals.some((approval) => approval.tlLgtmStatus === "Approved");
+
+    if (hasApprovedSubmission) {
+      return {
+        valid: false,
+        message: `Ratings for ${cycleQ} ${cycleY} have already been submitted and cannot be reopened.`,
+      };
+    }
+
+    return { valid: true };
+  };
+
+  const handleToggleCycle = async (checked: boolean) => {
+    if (checked && !isCycleOpen) {
+      try {
+        const submittedValidation = await validateNoApprovedSubmissionsBeforeOpeningCycle();
+        if (!submittedValidation.valid) {
+          setKpiWeightWarningMessage(submittedValidation.message ?? "Ratings have already been submitted and cannot be reopened.");
+          setKpiWeightWarningOpen(true);
+          return;
+        }
+
+        const validation = await validateKpiWeightageBeforeOpeningCycle();
+        if (!validation.valid) {
+          setKpiWeightWarningMessage(validation.message ?? "Manage your KPI weightage.");
+          setKpiWeightWarningOpen(true);
+          return;
+        }
+      } catch (error) {
+        toast({
+          title: "Unable to validate KPI weightage",
+          description: error instanceof Error ? error.message : "Please try again.",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
     setPendingCycleState(checked);
     setCycleConfirmOpen(true);
   };
@@ -202,9 +295,17 @@ export default function ManageTeam() {
         });
       }
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Please try again.";
+      const isWarningPopupError = pendingCycleState === true && /kpi weightage|100%|L1|L2|L3|already been submitted|cannot be reopened/i.test(errorMessage);
+
+      if (isWarningPopupError) {
+        setKpiWeightWarningMessage(errorMessage || "Manage your KPI weightage.");
+        setKpiWeightWarningOpen(true);
+      }
+
       toast({
         title: "Failed to update cycle status",
-        description: error instanceof Error ? error.message : "Please try again.",
+        description: errorMessage,
         variant: "destructive",
       });
       setCycleConfirmOpen(false);
@@ -565,6 +666,29 @@ export default function ManageTeam() {
             <AlertDialogCancel>No</AlertDialogCancel>
             <AlertDialogAction onClick={confirmCycleToggle} disabled={isCycleUpdating}>
               {isCycleUpdating ? "Updating..." : "Yes"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={kpiWeightWarningOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setKpiWeightWarningOpen(false);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>KPI Weightage Warning</AlertDialogTitle>
+            <AlertDialogDescription>
+              {kpiWeightWarningMessage || "Manage your KPI weightage."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setKpiWeightWarningOpen(false)}>
+              OK
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

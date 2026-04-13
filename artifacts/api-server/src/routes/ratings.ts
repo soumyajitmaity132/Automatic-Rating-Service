@@ -244,6 +244,8 @@ router.get("/summary", authenticate, async (req: AuthRequest, res) => {
 
     const ratings = await db
       .select({
+        itemId: ratingsTable.itemId,
+        itemName: itemsToRateTable.itemName,
         ratingValue: ratingsTable.ratingValue,
         category: itemsToRateTable.category,
         weight: itemsToRateTable.weight,
@@ -254,33 +256,50 @@ router.get("/summary", authenticate, async (req: AuthRequest, res) => {
         and(
           eq(ratingsTable.userId, userId),
           eq(ratingsTable.quarter, quarter),
-          eq(ratingsTable.year, parseInt(year)),
-          or(eq(ratingsTable.status, "submitted"), isNull(ratingsTable.status))
+          eq(ratingsTable.year, parseInt(year))
         )
       );
 
-    // Build category map dynamically from DB weights
-    const categoryMap = new Map<string, { total: number; count: number; weight: number }>();
+    const itemMap = new Map<number, { itemId: number; values: number[]; itemName: string; category: string; weight: number }>();
     for (const r of ratings) {
-      const cat = r.category || "Uncategorized";
-      const weight = r.weight || 0;
-      if (!categoryMap.has(cat)) {
-        categoryMap.set(cat, { total: 0, count: 0, weight });
+      const itemId = Number(r.itemId);
+      if (!Number.isFinite(itemId)) {
+        continue;
       }
-      const entry = categoryMap.get(cat)!;
-      entry.total += r.ratingValue;
-      entry.count += 1;
+
+      const category = r.category || "Uncategorized";
+      const itemName = r.itemName || `KPI ${itemId}`;
+      const weight = Number(r.weight ?? 0);
+      if (!itemMap.has(itemId)) {
+        itemMap.set(itemId, { itemId, values: [], itemName, category, weight });
+      }
+
+      const entry = itemMap.get(itemId)!;
+      const ratingValue = Number(r.ratingValue);
+      if (Number.isFinite(ratingValue) && ratingValue >= 0 && ratingValue <= 5) {
+        entry.values.push(ratingValue);
+      }
     }
 
-    let weightedScore = 0;
     const categoryScores = [];
-    for (const [category, data] of categoryMap.entries()) {
-      const avgRating = data.count > 0 ? data.total / data.count : 0;
-      const weightedContribution = avgRating * data.weight;
+    let weightedScore = 0;
+    for (const [, itemData] of itemMap.entries()) {
+      if (itemData.values.length === 0) {
+        continue;
+      }
+      if (!Number.isFinite(itemData.weight) || itemData.weight <= 0) {
+        continue;
+      }
+
+      const avgRating = itemData.values.reduce((sum, value) => sum + value, 0) / itemData.values.length;
+      const weightedContribution = avgRating * itemData.weight;
       weightedScore += weightedContribution;
+
       categoryScores.push({
-        category,
-        weight: data.weight,
+        category: itemData.itemName,
+        sourceCategory: itemData.category,
+        itemId: itemData.itemId,
+        weight: itemData.weight,
         avgRating,
         weightedContribution,
       });

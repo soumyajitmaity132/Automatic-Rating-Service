@@ -57,6 +57,10 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
       const key = `${quarterYear.quarter} ${quarterYear.year}`;
 
       query.data?.forEach((approval) => {
+        if (approval.tlLgtmStatus !== "Approved") {
+          return;
+        }
+
         if (!result[approval.ratedUserId]) {
           result[approval.ratedUserId] = {};
         }

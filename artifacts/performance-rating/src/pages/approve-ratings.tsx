@@ -595,7 +595,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
       const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
       const inputRaw = tlVals[rowKey] ?? "";
       const inputNum = parseFloat(inputRaw);
-      const inputHasValue = !Number.isNaN(inputNum) && inputNum >= 0.1 && inputNum <= 5.0;
+      const inputHasValue = !Number.isNaN(inputNum) && inputNum >= 0 && inputNum <= 5;
       const inputComment = (leadComments[rowKey] ?? "").trim();
 
       const activeDraft = activeDraftByItem.get(rowKey);
@@ -622,6 +622,45 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
     [drafts],
   );
 
+  const canSendToUser = useMemo(() => {
+    const memberRatings = ratings ?? [];
+    if (memberRatings.length === 0) {
+      return false;
+    }
+
+    if (pendingDraftRows.length > 0) {
+      return false;
+    }
+
+    return memberRatings.every((rating) => {
+      const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
+      const activeDraft = activeDraftByItem.get(rowKey);
+      if (!activeDraft || activeDraft.status !== "saved") {
+        return false;
+      }
+
+      const rawLeadRating = tlVals[rowKey];
+      const leadRating = rawLeadRating !== undefined && rawLeadRating !== ""
+        ? Number(rawLeadRating)
+        : Number(activeDraft.ratingValue);
+      if (!Number.isFinite(leadRating) || leadRating < 0 || leadRating > 5) {
+        return false;
+      }
+
+      const userRating = typeof rating.ratingValue === "number"
+        ? rating.ratingValue
+        : parseFloat(String(rating.ratingValue ?? ""));
+
+      const ratingDiffers = !Number.isNaN(userRating) && Math.abs(leadRating - userRating) > 0.000001;
+      const leadComment = ((leadComments[rowKey] ?? "").trim() || (activeDraft.leadComment ?? "").trim());
+      if (ratingDiffers && !leadComment) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [ratings, activeDraftByItem, tlVals, leadComments, pendingDraftRows.length]);
+
   const handleSaveAllDrafts = async () => {
     if (pendingDraftRows.length === 0) {
       toast({ title: "No changes to save", description: "Add or edit at least one rating row before saving." });
@@ -631,8 +670,8 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
     for (const rating of pendingDraftRows) {
       const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
       const leadRating = parseFloat(tlVals[rowKey] ?? "");
-      if (Number.isNaN(leadRating) || leadRating < 0.1 || leadRating > 5.0) {
-        toast({ title: "Invalid lead rating", description: "Enter a valid rating (0.1–5.0) for all changed rows before saving.", variant: "destructive" });
+      if (Number.isNaN(leadRating) || leadRating < 0 || leadRating > 5) {
+        toast({ title: "Invalid lead rating", description: "Enter a valid rating (0–5) for all changed rows before saving.", variant: "destructive" });
         return;
       }
 
@@ -738,12 +777,32 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
 
   const handleFixDispute = async () => {
     if (!selectedDisputeDraft?.draftId) return;
+    const disputeRowKey = getRatingRowKey(selectedDisputeDraft.itemId, selectedDisputeDraft.projectName);
+    const latestLeadRatingRaw = tlVals[disputeRowKey];
+    const latestLeadRating = latestLeadRatingRaw !== undefined && latestLeadRatingRaw !== ""
+      ? Number(latestLeadRatingRaw)
+      : Number(selectedDisputeDraft.ratingValue);
+    const latestLeadComment = (leadComments[disputeRowKey] ?? selectedDisputeDraft.leadComment ?? "").trim();
+
+    if (!Number.isFinite(latestLeadRating) || latestLeadRating < 0 || latestLeadRating > 5) {
+      toast({
+        title: "Invalid lead rating",
+        description: "Lead Rating must be between 0 and 5 before marking dispute as fixed.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       setIsFixingDispute(true);
       const response = await fetch("/api/tl-drafts/fix-dispute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ draftId: selectedDisputeDraft.draftId }),
+        body: JSON.stringify({
+          draftId: selectedDisputeDraft.draftId,
+          ratingValue: latestLeadRating,
+          leadComment: latestLeadComment,
+        }),
       });
       if (!response.ok) {
         const err = await response.json().catch(() => null);
@@ -937,10 +996,10 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                               <div className="space-y-1">
                                 <Input
                                   type="number"
-                                  min="0.1"
-                                  max="5.0"
+                                  min="0"
+                                  max="5"
                                   step="0.1"
-                                  placeholder="0.1–5.0"
+                                  placeholder="0–5"
                                   value={rawVal}
                                   onChange={(e) => setTlVals((prev) => ({ ...prev, [rowKey]: e.target.value }))}
                                   className="w-28"
@@ -1045,7 +1104,8 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                       <Button
                         variant="secondary"
                         onClick={handleSendToUser}
-                        disabled={isSendingToUser || sendableDraftCount === 0}
+                        disabled={isSendingToUser || !canSendToUser}
+                        title={!canSendToUser ? "Provide valid Lead Rating (0-5) for all rows and Lead Comment wherever Lead Rating differs from User Rating" : undefined}
                       >
                         {isSendingToUser ? "Sending..." : `Send to ${member.displayName}`}
                       </Button>
@@ -1056,7 +1116,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                           (ratings ?? []).some((rating) => {
                             const rowKey = getRatingRowKey(rating.itemId, rating.projectName);
                             const value = Number(activeDraftByItem.get(rowKey)?.ratingValue);
-                            return Number.isNaN(value) || value < 0.1 || value > 5.0;
+                            return Number.isNaN(value) || value < 0 || value > 5;
                           })}
                         title={drafts.some((d) => d.isActive && d.status === "dispute raised")
                           ? "Resolve all disputes before submitting"

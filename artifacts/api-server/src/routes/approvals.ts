@@ -4,6 +4,7 @@ import { approvalsTable, itemsToRateTable, usersTable, ratingsTable, tlDraftTabl
 import { eq, and, inArray, isNull, desc } from "drizzle-orm";
 import { authenticate, AuthRequest } from "../middlewares/authenticate.js";
 import { sendEmail } from "../lib/mailer.js";
+import { setRatingCycleStatus } from "../lib/rating-cycle.js";
 
 const router = Router();
 
@@ -47,6 +48,71 @@ function normalizeProjectName(value: unknown): string | null {
 
 function ratingProjectKey(itemId: number, projectName?: string | null): string {
   return `${itemId}::${(projectName ?? "").trim()}`;
+}
+
+async function updateTotalWeightedRatingForUser(params: {
+  ratedUserId: string;
+  teamId: number;
+  quarter: string;
+  year: number;
+}) {
+  const allUserApprovals = await db
+    .select()
+    .from(approvalsTable)
+    .where(
+      and(
+        eq(approvalsTable.ratedUserId, params.ratedUserId),
+        eq(approvalsTable.teamId, params.teamId),
+        eq(approvalsTable.quarter, params.quarter),
+        eq(approvalsTable.year, params.year),
+      )
+    );
+
+  if (allUserApprovals.length === 0) {
+    return null;
+  }
+
+  const teamItems = await db
+    .select()
+    .from(itemsToRateTable)
+    .where(eq(itemsToRateTable.teamId, params.teamId));
+
+  const itemRatings: Record<number, number[]> = {};
+  for (const approval of allUserApprovals) {
+    const effectiveRating = approval.tlRatingValue ?? approval.selfRatingValue;
+    if (effectiveRating !== null && effectiveRating !== undefined) {
+      if (!itemRatings[approval.itemId]) itemRatings[approval.itemId] = [];
+      itemRatings[approval.itemId].push(Number(effectiveRating));
+    }
+  }
+
+  let weightedSum = 0;
+  let hasAny = false;
+  for (const item of teamItems) {
+    const weight = Number(item.weight ?? 0);
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    const values = itemRatings[item.itemId];
+    if (!values || values.length === 0) continue;
+    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+    weightedSum += weight * average;
+    hasAny = true;
+  }
+
+  const finalWeightedRating = hasAny ? weightedSum : null;
+
+  await db
+    .update(approvalsTable)
+    .set({ totalWeightedRating: finalWeightedRating })
+    .where(
+      and(
+        eq(approvalsTable.ratedUserId, params.ratedUserId),
+        eq(approvalsTable.teamId, params.teamId),
+        eq(approvalsTable.quarter, params.quarter),
+        eq(approvalsTable.year, params.year),
+      )
+    );
+
+  return finalWeightedRating;
 }
 
 router.get("/", authenticate, async (req: AuthRequest, res) => {
@@ -203,6 +269,15 @@ router.post("/submit-user", authenticate, async (req: AuthRequest, res) => {
       createdCount += 1;
     }
 
+    await updateTotalWeightedRatingForUser({
+      ratedUserId,
+      teamId,
+      quarter,
+      year,
+    });
+
+    await setRatingCycleStatus(teamId, quarter, year, false, currentUser.userId);
+
     res.status(201).json({
       message: `Submitted ${createdCount} row(s) for ${quarter} ${year}`,
       count: createdCount,
@@ -327,51 +402,12 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 
     // Recalculate total_weighted_rating for this user/quarter/year and update all their approval rows
     try {
-      const allUserApprovals = await db
-        .select()
-        .from(approvalsTable)
-        .where(
-          and(
-            eq(approvalsTable.ratedUserId, ratedUserId),
-            eq(approvalsTable.quarter, quarter),
-            eq(approvalsTable.year, Number(year))
-          )
-        );
-
-      const teamItems = await db
-        .select()
-        .from(itemsToRateTable)
-        .where(eq(itemsToRateTable.teamId, Number(teamId)));
-
-      // Group tlRatingValues by itemId to compute per-item average
-      const itemRatings: Record<number, number[]> = {};
-      for (const a of allUserApprovals) {
-        if (a.tlRatingValue !== null && a.tlRatingValue !== undefined) {
-          if (!itemRatings[a.itemId]) itemRatings[a.itemId] = [];
-          itemRatings[a.itemId].push(a.tlRatingValue);
-        }
-      }
-
-      // weighted sum across all items that have at least one TL rating
-      let weightedSum = 0;
-      let hasAny = false;
-      for (const item of teamItems) {
-        const w = Number(item.weight ?? 0);
-        if (!Number.isFinite(w) || w <= 0) continue;
-        const vals = itemRatings[item.itemId];
-        if (!vals || vals.length === 0) continue;
-        const avg = vals.reduce((s, v) => s + v, 0) / vals.length;
-        weightedSum += w * avg;
-        hasAny = true;
-      }
-
-      if (hasAny) {
-        const approvalIds = allUserApprovals.map((a) => a.approvalId);
-        await db
-          .update(approvalsTable)
-          .set({ totalWeightedRating: weightedSum })
-          .where(inArray(approvalsTable.approvalId, approvalIds));
-      }
+      await updateTotalWeightedRatingForUser({
+        ratedUserId,
+        teamId: Number(teamId),
+        quarter,
+        year: Number(year),
+      });
     } catch (weightErr) {
       req.log.warn(weightErr, "Failed to update total_weighted_rating");
     }

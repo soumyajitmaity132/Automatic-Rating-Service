@@ -286,6 +286,10 @@ function MemberAccordion({
                   const status = rowStatus[key] ?? "pending";
                   const isSubmitted = status === "sent";
                   const artifactLinks = parseArtifactLinks(row.artifactLinks);
+                  const parsedReferredLeadRating = parseFloat(form.referredLeadRating);
+                  const isReferredLeadRatingDifferent =
+                    !Number.isNaN(parsedReferredLeadRating) &&
+                    Math.abs(parsedReferredLeadRating - row.userRating) > 0.000001;
 
                   return (
                     <tr key={row.ratingId} className="hover:bg-secondary/20 transition-colors align-top">
@@ -351,8 +355,11 @@ function MemberAccordion({
                       </td>
                       <td className="px-4 py-3">
                         <div className="space-y-1 min-w-[200px]">
-                          <Label className="text-[10px] text-muted-foreground uppercase tracking-wide sr-only">
+                          <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">
                             Referred Lead Comment
+                            {isReferredLeadRatingDifferent && (
+                              <span className="text-destructive ml-0.5">*</span>
+                            )}
                           </Label>
                           <Textarea
                             placeholder="Add referral comment..."
@@ -518,11 +525,21 @@ export default function ReferedRatings() {
     const key = getRowKey(row);
     const form = rowState[key] ?? { referredLeadRating: "", referredLeadComment: "" };
     const rating = parseFloat(form.referredLeadRating);
+    const comment = form.referredLeadComment.trim();
 
     if (!form.referredLeadRating || Number.isNaN(rating) || rating < 0.1 || rating > 5.0) {
       toast({
         title: "Invalid Rating",
         description: "Please enter a rating between 0.1 and 5.0.",
+        variant: "destructive",
+      });
+      return false;
+    }
+
+    if (Math.abs(rating - row.userRating) > 0.000001 && !comment) {
+      toast({
+        title: "Referred Lead Comment required",
+        description: "Referred Lead Comment is mandatory when Referred Lead Rating differs from User Rating.",
         variant: "destructive",
       });
       return false;
