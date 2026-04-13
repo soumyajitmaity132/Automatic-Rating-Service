@@ -106,7 +106,13 @@ router.post("/forgot-password/request", async (req, res) => {
   try {
     const email = String(req.body?.email ?? "").trim().toLowerCase();
     if (!email) {
-      res.status(400).json({ error: "Bad Request", message: "Email is required" });
+      res.status(400).json({ error: "Bad Request", message: "Incorrect email" });
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      res.status(400).json({ error: "Bad Request", message: "Incorrect email" });
       return;
     }
 
@@ -114,36 +120,39 @@ router.post("/forgot-password/request", async (req, res) => {
 
     const [user] = await db.select().from(usersTable).where(eq(usersTable.email, email));
 
-    if (user) {
-      const passcode = generatePasscode();
-      const codeHash = await hashPassword(passcode);
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-      await pool.query(
-        `
-          UPDATE password_reset_codes
-          SET consumed = TRUE
-          WHERE email = $1 AND consumed = FALSE
-        `,
-        [email],
-      );
-
-      await pool.query(
-        `
-          INSERT INTO password_reset_codes (user_id, email, code_hash, expires_at, consumed)
-          VALUES ($1, $2, $3, $4, FALSE)
-        `,
-        [user.userId, email, codeHash, expiresAt],
-      );
-
-      await sendEmail({
-        to: email,
-        subject: "Your Employee Performance Portal reset code",
-        text: `Hi ${user.displayName},\n\nYour password reset verification code is: ${passcode}\n\nThis code will expire in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
-      });
+    if (!user) {
+      res.status(400).json({ error: "Bad Request", message: "Incorrect email" });
+      return;
     }
 
-    res.json({ message: "If this email exists, a passcode has been sent." });
+    const passcode = generatePasscode();
+    const codeHash = await hashPassword(passcode);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await pool.query(
+      `
+        UPDATE password_reset_codes
+        SET consumed = TRUE
+        WHERE email = $1 AND consumed = FALSE
+      `,
+      [email],
+    );
+
+    await pool.query(
+      `
+        INSERT INTO password_reset_codes (user_id, email, code_hash, expires_at, consumed)
+        VALUES ($1, $2, $3, $4, FALSE)
+      `,
+      [user.userId, email, codeHash, expiresAt],
+    );
+
+    await sendEmail({
+      to: email,
+      subject: "Your Employee Performance Portal reset code",
+      text: `Hi ${user.displayName},\n\nYour password reset verification code is: ${passcode}\n\nThis code will expire in 10 minutes.\n\nIf you did not request this, please ignore this email.`,
+    });
+
+    res.json({ message: "Passcode sent successfully" });
   } catch (err) {
     req.log.error(err, "Forgot password request error");
     res.status(500).json({ error: "Internal Server Error" });

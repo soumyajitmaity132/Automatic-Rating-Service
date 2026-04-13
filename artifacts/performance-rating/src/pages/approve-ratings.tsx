@@ -534,6 +534,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
   const hasPending = !open || submittedCount < totalCount || totalCount === 0;
   const alreadySubmittedForPeriod = (approvals?.length ?? 0) > 0;
   const isStage5 = stageInfo?.stage === 5 || alreadySubmittedForPeriod;
+  const ratingsNotOpened = (stageInfo?.stage === 1) && ((stageInfo?.stageLabel ?? "").toLowerCase() === "ratings not opened");
 
   const handleSubmitForUser = async () => {
     if (alreadySubmittedForPeriod) {
@@ -817,7 +818,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                 <p className="text-sm text-muted-foreground">{member.level}</p>
                 {stageInfo && (
                   <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${stageBadgeClasses(stageInfo.stage)}`}>
-                    Stage {stageInfo.stage}: {stageInfo.stageLabel}
+                    {ratingsNotOpened ? stageInfo.stageLabel : `Stage ${stageInfo.stage}: ${stageInfo.stageLabel}`}
                   </span>
                 )}
               </div>
@@ -830,9 +831,14 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
             <Button
               size="sm"
               variant="outline"
-              onClick={e => { e.stopPropagation(); setNotifyOpen(true); }}
+              onClick={e => {
+                e.stopPropagation();
+                if (ratingsNotOpened) return;
+                setNotifyOpen(true);
+              }}
               className="shrink-0"
-              title="Send notification to this member"
+              title={ratingsNotOpened ? "Ratings are not opened for this quarter/year" : "Send notification to this member"}
+              disabled={ratingsNotOpened}
             >
               <Bell className="w-4 h-4 mr-1" /> Notify
             </Button>

@@ -45,8 +45,15 @@ export default function Login() {
   };
 
   const handleRequestPasscode = async () => {
-    if (!forgotEmail.trim()) {
-      toast({ title: "Email required", variant: "destructive" });
+    const normalizedEmail = forgotEmail.trim().toLowerCase();
+    if (!normalizedEmail) {
+      toast({ title: "Incorrect email", variant: "destructive" });
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(normalizedEmail)) {
+      toast({ title: "Incorrect email", variant: "destructive" });
       return;
     }
 
@@ -57,7 +64,7 @@ export default function Login() {
       const response = await fetch("/api/auth/forgot-password/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: forgotEmail.trim() }),
+        body: JSON.stringify({ email: normalizedEmail }),
         signal: controller.signal,
       });
       clearTimeout(timeoutId);
@@ -75,7 +82,9 @@ export default function Login() {
         description: error instanceof Error
           ? error.name === "AbortError"
             ? "Request timed out. Please verify SMTP settings and try again."
-            : error.message
+            : error.message === "Incorrect email"
+              ? "Incorrect email"
+              : error.message
           : "Please try again.",
         variant: "destructive",
       });

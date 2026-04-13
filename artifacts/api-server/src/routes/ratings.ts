@@ -105,6 +105,8 @@ router.get("/member-stages", authenticate, async (req: AuthRequest, res) => {
       return;
     }
 
+    const cycleOpen = await getRatingCycleStatus(teamId, quarter, year);
+
     const teamUsers = await db
       .select({ userId: usersTable.userId, displayName: usersTable.displayName, level: usersTable.level })
       .from(usersTable)
@@ -167,6 +169,16 @@ router.get("/member-stages", authenticate, async (req: AuthRequest, res) => {
     }
 
     const stageRows = teamUsers.map((member) => {
+      if (!cycleOpen) {
+        return {
+          userId: member.userId,
+          displayName: member.displayName,
+          level: member.level,
+          stage: 1,
+          stageLabel: "ratings not opened",
+        };
+      }
+
       const memberRatings = ratingRows.filter((row) => row.userId === member.userId);
       const submittedRatings = memberRatings.filter((row) => normalizeRatingStatus(row.status) === "submitted");
       const savedRatings = memberRatings.filter((row) => normalizeRatingStatus(row.status) !== "submitted");
