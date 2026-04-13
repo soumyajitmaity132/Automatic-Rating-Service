@@ -44,6 +44,36 @@ function normalizeOptionalText(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+function isValidUrl(value: string): boolean {
+  try {
+    const normalized = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    const url = new URL(normalized);
+    return url.hostname.length > 0 && url.hostname.includes(".");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeArtifactLinks(value: unknown): string | null {
+  const parts = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : typeof value === "string"
+      ? [value]
+      : [];
+
+  const links = parts
+    .flatMap((entry) => entry.split(/[\n,]+/))
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .filter(isValidUrl);
+
+  if (links.length === 0) {
+    return null;
+  }
+
+  return Array.from(new Set(links)).join(", ");
+}
+
 router.get("/member-stages", authenticate, async (req: AuthRequest, res) => {
   try {
     const currentUser = req.user!;
@@ -421,6 +451,7 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
     const { itemId, ratingValue, comment, kpiAchieved, projectName, quarter, year, artifactLinks, status } = req.body;
     const resolvedKpiAchieved = kpiAchieved ?? comment;
     const resolvedStatus = normalizeRatingStatus(status);
+    const normalizedArtifactLinks = normalizeArtifactLinks(artifactLinks);
 
     if (!itemId || ratingValue === undefined || ratingValue === null || !quarter || !year) {
       res.status(400).json({ error: "itemId, ratingValue, quarter, year are required" });
@@ -474,7 +505,13 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
     if (existing) {
       const [updated] = await db
         .update(ratingsTable)
-        .set({ ratingValue: numVal, kpiAchieved: resolvedKpiAchieved, projectName, artifactLinks, status: resolvedStatus })
+        .set({
+          ratingValue: numVal,
+          kpiAchieved: resolvedKpiAchieved,
+          projectName,
+          artifactLinks: normalizedArtifactLinks,
+          status: resolvedStatus,
+        })
         .where(eq(ratingsTable.ratingId, existing.ratingId))
         .returning();
 
@@ -484,7 +521,17 @@ router.post("/", authenticate, async (req: AuthRequest, res) => {
 
     const [rating] = await db
       .insert(ratingsTable)
-      .values({ itemId, userId: currentUser.userId, ratingValue: numVal, kpiAchieved: resolvedKpiAchieved, projectName, quarter, year, artifactLinks, status: resolvedStatus })
+      .values({
+        itemId,
+        userId: currentUser.userId,
+        ratingValue: numVal,
+        kpiAchieved: resolvedKpiAchieved,
+        projectName,
+        quarter,
+        year,
+        artifactLinks: normalizedArtifactLinks,
+        status: resolvedStatus,
+      })
       .returning();
 
     res.status(201).json({ ...rating, comment: rating.kpiAchieved, status: rating.status ?? "submitted", itemName: item?.itemName ?? null, category: item?.category ?? null, createdOn: toIsoDateString(rating.createdOn) });
@@ -595,7 +642,7 @@ router.put("/:ratingId", authenticate, async (req: AuthRequest, res) => {
     const updates: Record<string, unknown> = {};
 
     if (ratingValue !== undefined) updates.ratingValue = ratingValue;
-    if (artifactLinks !== undefined) updates.artifactLinks = artifactLinks;
+    if (artifactLinks !== undefined) updates.artifactLinks = normalizeArtifactLinks(artifactLinks);
     if (resolvedKpiAchieved !== undefined) updates.kpiAchieved = resolvedKpiAchieved;
     if (projectName !== undefined) updates.projectName = projectName;
     if (status !== undefined) updates.status = normalizeRatingStatus(status);

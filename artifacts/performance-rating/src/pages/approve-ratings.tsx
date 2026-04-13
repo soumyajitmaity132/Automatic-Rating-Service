@@ -31,6 +31,21 @@ function getRatingRowKey(itemId: number, projectName?: string | null): string {
   return `${itemId}::${(projectName ?? "").trim()}`;
 }
 
+function parseArtifactLinks(value?: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function toExternalLink(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
 interface TlDraft {
   draftId: number;
   ratingValue?: number | null;
@@ -877,6 +892,7 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                       const numVal = parseFloat(rawVal);
                       const label = !isNaN(numVal) && numVal > 0 ? ratingLabel(numVal) : null;
                       const kpiText = rating.kpiAchieved || rating.comment || "—";
+                      const artifactLinks = parseArtifactLinks(rating.artifactLinks);
                       const userRatingNum = typeof rating.ratingValue === "number" ? rating.ratingValue : parseFloat(String(rating.ratingValue ?? ""));
                       const isLeadRatingDifferent = !isNaN(numVal) && numVal > 0 && !isNaN(userRatingNum) && numVal !== userRatingNum;
                       return (
@@ -886,15 +902,20 @@ function MemberPanel({ member, quarter, year, currentUser, referableLeads, stage
                           <TableCell className="font-medium">{rating.ratingValue?.toFixed(1)}</TableCell>
                           <TableCell className="max-w-[260px] whitespace-pre-wrap">{kpiText}</TableCell>
                           <TableCell>
-                            {rating.artifactLinks ? (
-                              <a
-                                href={rating.artifactLinks}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-primary underline"
-                              >
-                                Open
-                              </a>
+                            {artifactLinks.length > 0 ? (
+                              <div className="flex flex-col gap-1">
+                                {artifactLinks.map((link, index) => (
+                                  <a
+                                    key={`${rating.ratingId}-${link}-${index}`}
+                                    href={toExternalLink(link)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-primary underline text-xs"
+                                  >
+                                    Link {index + 1}
+                                  </a>
+                                ))}
+                              </div>
                             ) : (
                               "—"
                             )}

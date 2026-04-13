@@ -65,6 +65,21 @@ function getRowKey(row: ReferredRatingRow): string {
   return `${row.ratedUserId}-${row.ratingId}`;
 }
 
+function parseArtifactLinks(value?: string | null): string[] {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function toExternalLink(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
 async function listReferredRatings(params: { quarter: string; year: number }): Promise<ReferredRatingRow[]> {
   const searchParams = new URLSearchParams({
     quarter: params.quarter,
@@ -270,6 +285,7 @@ function MemberAccordion({
                   const form = rowState[key] ?? { referredLeadRating: "", referredLeadComment: "" };
                   const status = rowStatus[key] ?? "pending";
                   const isSubmitted = status === "sent";
+                  const artifactLinks = parseArtifactLinks(row.artifactLinks);
 
                   return (
                     <tr key={row.ratingId} className="hover:bg-secondary/20 transition-colors align-top">
@@ -297,15 +313,20 @@ function MemberAccordion({
                         {row.kpiAchieved || "—"}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
-                        {row.artifactLinks ? (
-                          <a
-                            href={row.artifactLinks}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary text-xs underline underline-offset-2 hover:opacity-70 transition-opacity"
-                          >
-                            View Link
-                          </a>
+                        {artifactLinks.length > 0 ? (
+                          <div className="flex flex-col gap-1">
+                            {artifactLinks.map((link, index) => (
+                              <a
+                                key={`${row.ratingId}-${link}-${index}`}
+                                href={toExternalLink(link)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary text-xs underline underline-offset-2 hover:opacity-70 transition-opacity"
+                              >
+                                Link {index + 1}
+                              </a>
+                            ))}
+                          </div>
                         ) : "—"}
                       </td>
                       <td className="px-4 py-3">

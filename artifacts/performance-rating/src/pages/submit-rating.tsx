@@ -97,6 +97,36 @@ function getDisputeRowKey(itemId: number, projectName?: string | null): string {
   return `${itemId}::${(projectName ?? "").trim().toLowerCase()}`;
 }
 
+function parseArtifactLinks(value: string): string[] {
+  return value
+    .split(/[\n,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function normalizeArtifactLinks(value: string): string | undefined {
+  const links = parseArtifactLinks(value).filter(isValidUrl);
+  if (links.length === 0) {
+    return undefined;
+  }
+
+  return Array.from(new Set(links)).join(", ");
+}
+
+function toExternalLink(url: string): string {
+  return /^https?:\/\//i.test(url) ? url : `https://${url}`;
+}
+
+function isValidUrl(value: string): boolean {
+  try {
+    const normalized = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    const url = new URL(normalized);
+    return url.hostname.length > 0 && url.hostname.includes(".");
+  } catch {
+    return false;
+  }
+}
+
 function MandatoryAsterisk() {
   return (
     <Tooltip>
@@ -685,7 +715,7 @@ export default function SubmitRating() {
             projectName: project.projectName.trim(),
             quarter,
             year,
-            artifactLinks: project.artifactLinks.trim() || undefined,
+            artifactLinks: normalizeArtifactLinks(project.artifactLinks),
             status,
           },
         },
@@ -706,7 +736,7 @@ export default function SubmitRating() {
             ratingValue: parseFloat(project.ratingValue),
             kpiAchieved: project.comment || undefined,
             projectName: project.projectName.trim(),
-            artifactLinks: project.artifactLinks.trim() || undefined,
+            artifactLinks: normalizeArtifactLinks(project.artifactLinks),
             status,
           },
         },
@@ -1128,6 +1158,7 @@ export default function SubmitRating() {
                       {projects.map((project) => {
                         const numericValue = parseFloat(project.ratingValue);
                         const label = !Number.isNaN(numericValue) && numericValue > 0 ? ratingLabel(numericValue) : null;
+                        const artifactLinks = parseArtifactLinks(project.artifactLinks);
                         const isDisputeRaisedForProject = disputedRowKeys.has(
                           getDisputeRowKey(item.itemId, project.projectName),
                         );
@@ -1199,14 +1230,45 @@ export default function SubmitRating() {
 
                               <div className="space-y-2 md:col-span-3">
                                 <Label className="flex items-center gap-1.5 text-xs uppercase tracking-wide text-muted-foreground">
-                                  <LinkIcon className="w-3.5 h-3.5" /> Artifact Links
+                                  <LinkIcon className="w-3.5 h-3.5" /> Artifact Links (comma separated)
                                 </Label>
                                 <Input
-                                  placeholder="https://docs.google.com/..."
+                                  placeholder="https://docs.google.com/..., https://jira.company.com/..."
                                   value={project.artifactLinks}
                                   onChange={(e) => updateProject(item.itemId, project.id, { artifactLinks: e.target.value })}
                                   className="text-sm h-8"
                                 />
+                                {artifactLinks.length > 0 && (
+                                  <div className="flex flex-wrap gap-2 text-xs">
+                                    {artifactLinks.map((link, index) => {
+                                      const valid = isValidUrl(link);
+                                      return valid ? (
+                                        <a
+                                          key={`${project.id}-${link}-${index}`}
+                                          href={toExternalLink(link)}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-primary underline underline-offset-2"
+                                        >
+                                          Link {index + 1}
+                                        </a>
+                                      ) : (
+                                        <span
+                                          key={`${project.id}-${link}-${index}`}
+                                          className="text-destructive line-through opacity-70"
+                                          title="Not a valid URL — will not be saved"
+                                        >
+                                          {link}
+                                        </span>
+                                      );
+                                    })}
+                                    {artifactLinks.some((l) => !isValidUrl(l)) && (
+                                      <span className="text-destructive text-[10px] w-full mt-0.5">
+                                        Invalid entries (strikethrough) will not be saved — only valid URLs are accepted.
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           </div>
