@@ -18,8 +18,8 @@ export const ratingsTable = pgTable("ratings", {
   artifactLinks: text("artifact_links"),
   kpiAchieved: text("KPI_achieved"),
   projectName: varchar("project_name", { length: 255 }),
-  referencedTlUserId: text("referenced_tl_user_id").references(() => usersTable.userId),
-  status: text("status").default("pending"),
+  referencedTlUserId: text("referenced_tl_user_id"),
+  status: text("status"),
   createdOn: timestamp("created_on").defaultNow(),
 });
 

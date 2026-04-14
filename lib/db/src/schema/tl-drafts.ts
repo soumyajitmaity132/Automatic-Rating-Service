@@ -7,16 +7,13 @@ import { usersTable } from "./users";
 export const tlDraftTable = pgTable("tl_draft", {
   draftId: serial("draft_id").primaryKey(),
   ratingValue: doublePrecision("rating_value"),
-  itemId: integer("item_id")
-    .references(() => itemsToRateTable.itemId),
+  itemId: integer("item_id"),
   projectName: varchar("project_name", { length: 255 }),
-  ratedUserId: text("rated_user_id")
-    .references(() => usersTable.userId),
-  teamLeadUserId: text("team_lead_user_id")
-    .references(() => usersTable.userId),
+  ratedUserId: text("rated_user_id"),
+  teamLeadUserId: text("team_lead_user_id"),
   leadComment: text("lead_comment"),
   userDisputeMessage: text("user_dispute_message"),
-  status: text("status").notNull().default("saved"),
+  status: text("status"),
   quarter: text("quarter"),
   year: integer("year"),
   isActive: boolean("is_active").default(true),
