@@ -17,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { CheckCircle, XCircle, ChevronDown, ChevronUp, CheckSquare, AlertTriangle, Bell, History, UserPlus } from "lucide-react";
+import { CheckCircle, XCircle, ChevronDown, ChevronUp, CheckSquare, AlertTriangle, Bell, History, UserPlus, Users } from "lucide-react";
 
 function ratingLabel(v: number): string {
   if (v >= 4.5) return "Exceptional";
@@ -1296,6 +1296,7 @@ export default function ApproveRatings() {
   const currentYear = new Date().getFullYear();
   const [quarter, setQuarter] = useState<RatingQuarter>(RatingQuarter.Q1);
   const [year, setYear] = useState<number>(currentYear);
+  const [teamView, setTeamView] = useState<"my-team" | "other-teams">("my-team");
   const [referableLeads, setReferableLeads] = useState<ReferableTeamLead[]>([]);
   const [memberStages, setMemberStages] = useState<MemberStageInfo[]>([]);
 
@@ -1358,9 +1359,11 @@ export default function ApproveRatings() {
     };
   }, [user?.teamId, user?.role, quarter, year]);
 
+  // When showing other teams, fetch all users; otherwise fetch own team only
+  const listUsersParams = teamView === "other-teams" ? undefined : (user?.teamId ? { teamId: user.teamId } : undefined);
   const { data: members } = useListUsers(
-    user?.teamId ? { teamId: user.teamId } : undefined,
-    { query: { enabled: !!user?.teamId } }
+    listUsersParams,
+    { query: { enabled: !!user && user.role === "Team Lead" } }
   );
 
   const { data: disputes } = useListDisputes(
@@ -1380,8 +1383,28 @@ export default function ApproveRatings() {
     });
   };
 
-  const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+  const teamMembers = (members ?? []).filter(m => {
+    if (m.userId === user?.userId) return false;
+    if (m.role !== "User") return false;
+    // For other teams view: exclude own team members
+    if (teamView === "other-teams" && m.teamId === user?.teamId) return false;
+    return true;
+  });
   const stageByUserId = new Map(memberStages.map((entry) => [entry.userId, entry]));
+
+  // Group members by team name for other teams view
+  const groupedMembers = useMemo(() => {
+    if (teamView !== "other-teams") return null;
+    const grouped = new Map<string, typeof teamMembers>();
+    for (const m of teamMembers) {
+      const teamName = (m as any).teamName || "Unassigned";
+      if (!grouped.has(teamName)) {
+        grouped.set(teamName, []);
+      }
+      grouped.get(teamName)!.push(m);
+    }
+    return grouped;
+  }, [teamView, teamMembers]);
 
   if (isLoading || !user) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading...</div>;
 
@@ -1395,10 +1418,24 @@ export default function ApproveRatings() {
             </div>
             <div>
               <h1 className="text-2xl font-bold">Approve Ratings</h1>
-              <p className="text-muted-foreground text-sm">Review and rate your team members' self-evaluations</p>
+              <p className="text-muted-foreground text-sm">
+                {teamView === "other-teams"
+                  ? "View other teams' member evaluations"
+                  : "Review and rate your team members' self-evaluations"}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <Select value={teamView} onValueChange={(v) => setTeamView(v as "my-team" | "other-teams")}>
+              <SelectTrigger className="w-[140px] bg-background">
+                <Users className="w-4 h-4 mr-1.5 text-primary" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="my-team">My Team</SelectItem>
+                <SelectItem value="other-teams">Other Teams</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={quarter} onValueChange={(v) => setQuarter(v as RatingQuarter)}>
               <SelectTrigger className="w-[110px] bg-background"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -1444,9 +1481,36 @@ export default function ApproveRatings() {
         )}
 
         <div className="space-y-3">
-          <h2 className="text-lg font-semibold">Team Members</h2>
+          <h2 className="text-lg font-semibold">
+            {teamView === "other-teams" ? "Other Teams' Members" : "Team Members"}
+          </h2>
           {teamMembers.length === 0 ? (
-            <Card className="p-10 text-center border-dashed text-muted-foreground">No team members to review.</Card>
+            <Card className="p-10 text-center border-dashed text-muted-foreground">
+              {teamView === "other-teams" ? "No members found in other teams." : "No team members to review."}
+            </Card>
+          ) : teamView === "other-teams" && groupedMembers ? (
+            // Grouped by team name
+            [...groupedMembers.keys()].sort().map(teamName => (
+              <div key={teamName} className="space-y-3">
+                <div className="flex items-center gap-2 mt-4">
+                  <div className="w-2 h-2 rounded-full bg-primary" />
+                  <h3 className="text-sm font-semibold text-primary">{teamName}</h3>
+                  <span className="text-xs text-muted-foreground">({groupedMembers.get(teamName)!.length})</span>
+                  <div className="flex-1 h-px bg-border/50" />
+                </div>
+                {groupedMembers.get(teamName)!.map(m => (
+                  <MemberPanel
+                    key={m.userId}
+                    member={m}
+                    quarter={quarter}
+                    year={year}
+                    currentUser={user}
+                    referableLeads={referableLeads}
+                    stageInfo={stageByUserId.get(m.userId)}
+                  />
+                ))}
+              </div>
+            ))
           ) : (
             teamMembers.map(m => (
               <MemberPanel

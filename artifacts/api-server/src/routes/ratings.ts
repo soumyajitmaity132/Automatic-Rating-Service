@@ -170,6 +170,19 @@ router.get("/member-stages", authenticate, async (req: AuthRequest, res) => {
 
     const stageRows = teamUsers.map((member) => {
       if (!cycleOpen) {
+        // Even if the cycle is closed, check if this user already has approved submissions
+        const userApprovals = approvalRows.filter(
+          (row) => row.ratedUserId === member.userId && row.tlLgtmStatus === "Approved"
+        );
+        if (userApprovals.length > 0) {
+          return {
+            userId: member.userId,
+            displayName: member.displayName,
+            level: member.level,
+            stage: 5,
+            stageLabel: "Ratings already submitted",
+          };
+        }
         return {
           userId: member.userId,
           displayName: member.displayName,
