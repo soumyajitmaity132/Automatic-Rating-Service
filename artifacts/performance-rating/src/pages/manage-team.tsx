@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { Layout } from "@/components/layout";
-import { useListUsers, useUpdateUser, useRegisterUser, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
+import { useListUsers, useListTeams, useUpdateUser, useRegisterUser, useSendReminder, RatingQuarter } from "@workspace/api-client-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { useToast } from "@/hooks/use-toast";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Settings, UserMinus, Plus, Pencil, Mail, ShieldCheck, Bell, CalendarClock } from "lucide-react";
+import { Settings, UserMinus, Plus, Pencil, Mail, ShieldCheck, Bell, CalendarClock, Users } from "lucide-react";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -73,14 +73,29 @@ export default function ManageTeam() {
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [selectAll, setSelectAll] = useState(true);
 
+  // Direct / Indirect view mode for Primary Leads
+  const [viewMode, setViewMode] = useState<"direct" | "indirect">("direct");
+
   useEffect(() => {
     if (!isLoading && !token) setLocation("/login");
     if (!isLoading && user && user.role === "User") setLocation("/dashboard");
   }, [isLoading, token, user, setLocation]);
 
+  // Determine if logged-in Team Lead is Primary or Secondary
+  // isPrimaryLead comes from the /me endpoint response
+  const isPrimaryLead = user?.role === "Team Lead" ? (user as any).isPrimaryLead === true : false;
+  const isSecondaryLead = user?.role === "Team Lead" && !isPrimaryLead;
+
+  // For Primary Lead "direct" view: fetch own team members
+  // For Primary Lead "indirect" or Secondary Lead: fetch all users
+  const shouldFetchOwnTeam = isPrimaryLead && viewMode === "direct";
+  const listUsersParams = shouldFetchOwnTeam && user?.teamId
+    ? { teamId: user.teamId }
+    : undefined;
+
   const { data: members, isLoading: loadingMembers } = useListUsers(
-    user?.teamId ? { teamId: user.teamId } : undefined,
-    { query: { enabled: !!user?.teamId } as any }
+    listUsersParams,
+    { query: { enabled: !!user && user.role === "Team Lead" } as any }
   );
 
   const { mutate: updateUser, isPending } = useUpdateUser();
@@ -315,7 +330,20 @@ export default function ManageTeam() {
     }
   };
 
-  const teamMembers = members?.filter(m => m.userId !== user?.userId && m.role === "User") ?? [];
+  // Filter displayed members based on lead type and view mode
+  const teamMembers = (members ?? []).filter(m => {
+    // Exclude the logged-in user
+    if (m.userId === user?.userId) return false;
+    // Only show users with role "User"
+    if (m.role !== "User") return false;
+    // For Primary Lead Indirect view: show members NOT in this lead's team
+    if (isPrimaryLead && viewMode === "indirect") {
+      return m.teamId !== user?.teamId;
+    }
+    // For Secondary Lead: show all users with role "User"
+    // For Primary Lead Direct view: already filtered by teamId in API call
+    return true;
+  });
 
   const openReminderModal = async () => {
     if (!user?.teamId) return;
@@ -510,10 +538,29 @@ export default function ManageTeam() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold">Manage Team</h1>
-                <p className="text-muted-foreground text-sm">{user.teamName || "Your team"} · {teamMembers.length} member(s)</p>
+                <p className="text-muted-foreground text-sm">
+                  {isSecondaryLead
+                    ? `All Teams · ${teamMembers.length} member(s)`
+                    : viewMode === "indirect"
+                      ? `Indirect Members · ${teamMembers.length} member(s)`
+                      : `${user.teamName || "Your team"} · ${teamMembers.length} member(s)`
+                  }
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              {isPrimaryLead && (
+                <Select value={viewMode} onValueChange={(v) => setViewMode(v as "direct" | "indirect")}>
+                  <SelectTrigger className="w-[140px] bg-background" id="view-mode-select">
+                    <Users className="w-4 h-4 mr-1.5 text-primary" />
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="direct">Direct</SelectItem>
+                    <SelectItem value="indirect">Indirect</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
               <Button
                 variant="outline"
                 onClick={openReminderModal}
@@ -581,46 +628,120 @@ export default function ManageTeam() {
             <Settings className="w-12 h-12 mx-auto text-muted-foreground/40 mb-3" />
             <p className="text-muted-foreground">No team members yet. Add the first one using the button above.</p>
           </Card>
-        ) : (
-          <div className="space-y-3">
-            {teamMembers.map(m => (
-              <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
-                    {m.displayName.charAt(0)}
+        ) : (() => {
+          // Determine if we should group members by team
+          const showGrouped = isSecondaryLead || (isPrimaryLead && viewMode === "indirect");
+
+          if (showGrouped) {
+            // Group members by team name
+            const grouped = new Map<string, typeof teamMembers>();
+            for (const m of teamMembers) {
+              const teamName = (m as any).teamName || "Unassigned";
+              if (!grouped.has(teamName)) {
+                grouped.set(teamName, []);
+              }
+              grouped.get(teamName)!.push(m);
+            }
+
+            // Sort team names alphabetically
+            const sortedTeamNames = [...grouped.keys()].sort();
+
+            return (
+              <div className="space-y-5">
+                {sortedTeamNames.map(teamName => (
+                  <div key={teamName}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-2 h-2 rounded-full bg-primary" />
+                      <h3 className="text-sm font-semibold text-primary">{teamName}</h3>
+                      <span className="text-xs text-muted-foreground">({grouped.get(teamName)!.length})</span>
+                      <div className="flex-1 h-px bg-border/50" />
+                    </div>
+                    <div className="space-y-3 pl-4">
+                      {grouped.get(teamName)!.map(m => (
+                        <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
+                              {m.displayName.charAt(0)}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold truncate">{m.displayName}</p>
+                              <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
+                              {(m as any).ldap && (
+                                <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
+                              )}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-primary border-primary/20 hover:bg-primary/10"
+                              onClick={() => openEdit(m)}
+                              id={`edit-user-${m.userId}`}
+                            >
+                              <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                              onClick={() => setRemovingId(m.userId)}
+                              id={`remove-user-${m.userId}`}
+                            >
+                              <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                            </Button>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
                   </div>
-                  <div className="min-w-0">
-                    <p className="font-semibold truncate">{m.displayName}</p>
-                    <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
-                    {(m as any).ldap && (
-                      <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
-                    )}
+                ))}
+              </div>
+            );
+          }
+
+          // Flat list (Primary Lead Direct view)
+          return (
+            <div className="space-y-3">
+              {teamMembers.map(m => (
+                <Card key={m.userId} className="p-4 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-full bg-primary/10 text-primary flex items-center justify-center font-bold shrink-0">
+                      {m.displayName.charAt(0)}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="font-semibold truncate">{m.displayName}</p>
+                      <p className="text-sm text-muted-foreground truncate">{m.email} · {m.level}</p>
+                      {(m as any).ldap && (
+                        <p className="text-xs text-muted-foreground/70 truncate">LDAP: {(m as any).ldap}</p>
+                      )}
+                    </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-primary border-primary/20 hover:bg-primary/10"
-                    onClick={() => openEdit(m)}
-                    id={`edit-user-${m.userId}`}
-                  >
-                    <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-destructive border-destructive/20 hover:bg-destructive/10"
-                    onClick={() => setRemovingId(m.userId)}
-                    id={`remove-user-${m.userId}`}
-                  >
-                    <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
-                  </Button>
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-primary border-primary/20 hover:bg-primary/10"
+                      onClick={() => openEdit(m)}
+                      id={`edit-user-${m.userId}`}
+                    >
+                      <Pencil className="w-3.5 h-3.5 mr-1.5" /> Edit
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive border-destructive/20 hover:bg-destructive/10"
+                      onClick={() => setRemovingId(m.userId)}
+                      id={`remove-user-${m.userId}`}
+                    >
+                      <UserMinus className="w-3.5 h-3.5 mr-1.5" /> Remove
+                    </Button>
+                  </div>
+                </Card>
+              ))}
+            </div>
+          );
+        })()}
       </div>
 
       <AlertDialog open={!!removingId} onOpenChange={(o) => !o && setRemovingId(null)}>

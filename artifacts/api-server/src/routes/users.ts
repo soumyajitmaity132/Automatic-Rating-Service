@@ -37,9 +37,12 @@ router.get("/", authenticate, async (req: AuthRequest, res) => {
         ? await db.select().from(usersTable).where(eq(usersTable.teamId, teamId))
         : await db.select().from(usersTable);
     } else if (currentUser.role === "Team Lead") {
-      users = currentUser.teamId
-        ? await db.select().from(usersTable).where(eq(usersTable.teamId, currentUser.teamId))
-        : [];
+      if (teamId !== undefined) {
+        users = await db.select().from(usersTable).where(eq(usersTable.teamId, teamId));
+      } else {
+        // No teamId filter: return all users (for Secondary Leads or Indirect view)
+        users = await db.select().from(usersTable);
+      }
     } else {
       users = await db.select().from(usersTable).where(eq(usersTable.userId, currentUser.userId));
     }

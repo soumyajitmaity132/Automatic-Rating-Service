@@ -8,6 +8,7 @@ interface TeamMemberRatings {
   userId: string;
   username: string;
   displayName: string;
+  teamName: string;
   ratings: Record<string, number | null>;
 }
 
@@ -30,12 +31,16 @@ function getLastFourQuarters(quarter: RatingQuarter, year: number): Array<{ quar
   return result;
 }
 
-export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuarter; year: number }) {
+export function EvaluationHistoryTable({ quarter, year, showOtherTeams = false }: { quarter: RatingQuarter; year: number; showOtherTeams?: boolean }) {
   const { user } = useAuth();
 
+  // When showOtherTeams: fetch all users (no teamId filter)
+  // Otherwise: fetch only own team
+  const listUsersParams = showOtherTeams ? undefined : (user?.teamId ? { teamId: user.teamId } : undefined);
+
   const { data: teamMembers } = useListUsers(
-    user?.teamId ? { teamId: user.teamId } : undefined,
-    { query: { enabled: !!user?.teamId, queryKey: ["team-members", user?.teamId] } }
+    listUsersParams,
+    { query: { enabled: !!user, queryKey: ["team-members", showOtherTeams ? "all" : user?.teamId] } }
   );
 
   const lastFourQuarters = useMemo(() => getLastFourQuarters(quarter, year), [quarter, year]);
@@ -44,7 +49,7 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
   const approvalsQueries = lastFourQuarters.map((q) =>
     useListApprovals(
       { quarter: q.quarter, year: q.year },
-      { query: { enabled: !!user?.teamId, queryKey: ["approvals", q.quarter, q.year] } }
+      { query: { enabled: !!user, queryKey: ["approvals", showOtherTeams ? "all" : user?.teamId, q.quarter, q.year] } }
     )
   );
 
@@ -82,12 +87,18 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
 
   // Build the table data
   const tableData = useMemo<TeamMemberRatings[]>(() => {
-    const members = teamMembers?.filter((m) => m.userId !== user?.userId && m.role !== user?.role) || [];
+    let members = teamMembers?.filter((m) => m.userId !== user?.userId && m.role !== user?.role) || [];
+
+    // For other teams view: exclude members from lead's own team
+    if (showOtherTeams && user?.teamId) {
+      members = members.filter((m) => m.teamId !== user.teamId);
+    }
 
     return members.map((member) => ({
       userId: member.userId,
       username: member.username,
       displayName: member.displayName,
+      teamName: (member as any).teamName || "Unassigned",
       ratings: {
         [lastFourQuarters[0].quarter + " " + lastFourQuarters[0].year]:
           allApprovals[member.userId]?.[lastFourQuarters[0].quarter + " " + lastFourQuarters[0].year] ?? null,
@@ -99,15 +110,63 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
           allApprovals[member.userId]?.[lastFourQuarters[3].quarter + " " + lastFourQuarters[3].year] ?? null,
       },
     }));
-  }, [teamMembers, user?.userId, allApprovals, lastFourQuarters]);
+  }, [teamMembers, user?.userId, user?.teamId, showOtherTeams, allApprovals, lastFourQuarters]);
+
+  // Group by team name for other teams view
+  const groupedData = useMemo(() => {
+    if (!showOtherTeams) return null;
+    const grouped = new Map<string, TeamMemberRatings[]>();
+    for (const member of tableData) {
+      if (!grouped.has(member.teamName)) {
+        grouped.set(member.teamName, []);
+      }
+      grouped.get(member.teamName)!.push(member);
+    }
+    return grouped;
+  }, [showOtherTeams, tableData]);
 
   const isLoading = approvalsQueries.some((q) => q.isLoading);
+
+  const renderTableHeader = () => (
+    <thead className="text-xs text-muted-foreground bg-secondary/50 uppercase">
+      <tr>
+        <th className="px-5 py-3 text-left font-medium">Username</th>
+        <th className="px-5 py-3 text-left font-medium">Name</th>
+        {lastFourQuarters.map((q) => (
+          <th key={`${q.quarter}-${q.year}`} className="px-5 py-3 text-center font-medium">
+            {q.quarter} {q.year}
+          </th>
+        ))}
+      </tr>
+    </thead>
+  );
+
+  const renderMemberRow = (member: TeamMemberRatings) => (
+    <tr key={member.userId} className="bg-card hover:bg-muted/20 transition-colors">
+      <td className="px-5 py-4 font-mono text-sm">{member.username}</td>
+      <td className="px-5 py-4 font-medium">{member.displayName}</td>
+      {lastFourQuarters.map((q) => {
+        const rating = member.ratings[`${q.quarter} ${q.year}`];
+        return (
+          <td key={`${q.quarter}-${q.year}`} className="px-5 py-4 text-center">
+            {rating !== null ? (
+              <span className="font-bold font-mono text-primary">{rating.toFixed(2)}</span>
+            ) : (
+              <span className="text-muted-foreground">—</span>
+            )}
+          </td>
+        );
+      })}
+    </tr>
+  );
 
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
         <ClipboardList className="w-5 h-5 text-primary" />
-        <h2 className="text-xl font-bold">Evaluation History</h2>
+        <h2 className="text-xl font-bold">
+          {showOtherTeams ? "Other Teams — Evaluation History" : "Evaluation History"}
+        </h2>
       </div>
 
       <Card className="overflow-hidden">
@@ -116,41 +175,38 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
         ) : tableData.length === 0 ? (
           <div className="p-10 text-center">
             <ClipboardList className="w-10 h-10 mx-auto text-muted-foreground/40 mb-3" />
-            <p className="text-muted-foreground">No team members found.</p>
+            <p className="text-muted-foreground">
+              {showOtherTeams ? "No members found in other teams." : "No team members found."}
+            </p>
+          </div>
+        ) : showOtherTeams && groupedData ? (
+          // Grouped view for other teams
+          <div className="space-y-0">
+            {[...groupedData.keys()].sort().map((teamName) => (
+              <div key={teamName}>
+                <div className="flex items-center gap-2 px-5 py-3 bg-secondary/30 border-b border-border/50">
+                  <div className="w-2 h-2 rounded-full bg-primary" />
+                  <span className="text-sm font-semibold text-primary">{teamName}</span>
+                  <span className="text-xs text-muted-foreground">({groupedData.get(teamName)!.length})</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    {renderTableHeader()}
+                    <tbody className="divide-y divide-border/30">
+                      {groupedData.get(teamName)!.map(renderMemberRow)}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
+          // Flat table for own team
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
-              <thead className="text-xs text-muted-foreground bg-secondary/50 uppercase">
-                <tr>
-                  <th className="px-5 py-3 text-left font-medium">Username</th>
-                  <th className="px-5 py-3 text-left font-medium">Name</th>
-                  {lastFourQuarters.map((q) => (
-                    <th key={`${q.quarter}-${q.year}`} className="px-5 py-3 text-center font-medium">
-                      {q.quarter} {q.year}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
+              {renderTableHeader()}
               <tbody className="divide-y divide-border/30">
-                {tableData.map((member) => (
-                  <tr key={member.userId} className="bg-card hover:bg-muted/20 transition-colors">
-                    <td className="px-5 py-4 font-mono text-sm">{member.username}</td>
-                    <td className="px-5 py-4 font-medium">{member.displayName}</td>
-                    {lastFourQuarters.map((q) => {
-                      const rating = member.ratings[`${q.quarter} ${q.year}`];
-                      return (
-                        <td key={`${q.quarter}-${q.year}`} className="px-5 py-4 text-center">
-                          {rating !== null ? (
-                            <span className="font-bold font-mono text-primary">{rating.toFixed(2)}</span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
+                {tableData.map(renderMemberRow)}
               </tbody>
             </table>
           </div>
@@ -159,3 +215,4 @@ export function EvaluationHistoryTable({ quarter, year }: { quarter: RatingQuart
     </div>
   );
 }
+

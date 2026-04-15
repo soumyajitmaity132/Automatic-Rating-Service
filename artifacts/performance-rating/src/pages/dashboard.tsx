@@ -16,7 +16,7 @@ export default function Dashboard() {
   const currentYear = new Date().getFullYear();
   const [quarter, setQuarter] = useState<RatingQuarter>(RatingQuarter.Q1);
   const [year, setYear] = useState<number>(currentYear);
-  const [viewMode, setViewMode] = useState<"self" | "team">("team");
+  const [viewMode, setViewMode] = useState<"self" | "team" | "other-teams">("team");
   const [leadScore, setLeadScore] = useState<number | null>(null);
 
   useEffect(() => {
@@ -157,11 +157,12 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-3">
             {user.role === "Team Lead" && (
-              <Select value={viewMode} onValueChange={(v) => setViewMode(v as "self" | "team")}>
-                <SelectTrigger className="w-[110px] bg-background"><SelectValue /></SelectTrigger>
+              <Select value={viewMode} onValueChange={(v) => setViewMode(v as "self" | "team" | "other-teams")}>
+                <SelectTrigger className="w-[140px] bg-background"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="self">Self</SelectItem>
                   <SelectItem value="team">Team</SelectItem>
+                  <SelectItem value="other-teams">Other Teams</SelectItem>
                 </SelectContent>
               </Select>
             )}
@@ -184,8 +185,8 @@ export default function Dashboard() {
 
         {summary && summary.categoryScores.length > 0 && <SummaryCards summary={summary} leadScore={leadScore} />}
 
-        {user.role === "Team Lead" && viewMode === "team" ? (
-          <EvaluationHistoryTable quarter={quarter} year={year} />
+        {user.role === "Team Lead" && (viewMode === "team" || viewMode === "other-teams") ? (
+          <EvaluationHistoryTable quarter={quarter} year={year} showOtherTeams={viewMode === "other-teams"} />
         ) : (
           <UserView quarter={quarter} year={year} />
         )}

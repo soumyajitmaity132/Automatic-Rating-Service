@@ -293,6 +293,16 @@ router.get("/me", authenticate, async (req: AuthRequest, res) => {
       teamName = team?.teamName ?? null;
     }
 
+    // Determine if this Team Lead is a Primary Lead (their userId is in tl_user_id of any team)
+    let isPrimaryLead: boolean | undefined = undefined;
+    if (user.role === "Team Lead") {
+      const result = await pool.query(
+        `SELECT team_id FROM teams WHERE tl_user_id = $1 LIMIT 1`,
+        [user.userId]
+      );
+      isPrimaryLead = result.rows.length > 0;
+    }
+
     res.json({
       userId: user.userId,
       displayName: user.displayName,
@@ -302,6 +312,7 @@ router.get("/me", authenticate, async (req: AuthRequest, res) => {
       level: user.level,
       teamId: user.teamId,
       teamName,
+      isPrimaryLead,
     });
   } catch (err) {
     req.log.error(err, "Get me error");
